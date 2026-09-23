@@ -231,6 +231,13 @@ export class OrcService {
    * of leaving every later dispatch with nothing to route on. A classification
    * that does not call for ORC never installs one.
    *
+   * The heal is gated on the durable record, not on process memory: a fresh
+   * service over a resumed log has an empty in-memory map, so a replay carrying
+   * a low-risk classification would otherwise replace — or raise — the
+   * classification the run recorded before `riskOf` ever consults it. Once a
+   * classification is durable for a run, nothing overwrites it in either
+   * direction.
+   *
    * @throws when the classification does not call for ORC at all.
    */
   async start(supervisor: Agent, risk: RiskDecision): Promise<OrcState> {
@@ -239,7 +246,8 @@ export class OrcService {
     return await this.serialize(runId, async () => {
       const state = this.ports.journal.state(supervisor.session)
       if (state.started) {
-        if (!this.risks.has(runId) && risk.path === 'orc') this.risks.set(runId, risk)
+        const durable = this.ports.journal.risk(supervisor.session)
+        if (durable === null && !this.risks.has(runId) && risk.path === 'orc') this.risks.set(runId, risk)
         return state
       }
       if (risk.path !== 'orc') {

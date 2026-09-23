@@ -61,6 +61,18 @@ async function toReview(
   return { lead, peer }
 }
 
+/**
+ * A manual policy whose review route carries no benchmark evidence.
+ *
+ * Only the high-risk rule refuses that route, so a run's *effective*
+ * classification is observable in whether the unmeasured route may run.
+ */
+const unmeasuredReview = () => parseConfig({
+  analysisMode: 'manual',
+  allowed: [planRoute, codexRoute, claudeRoute],
+  manual: { spec: planRoute, plan: planRoute, review: planRoute, audit: claudeRoute },
+})
+
 /** The committed journal event names, in order. */
 const eventNames = (ports: FakePorts): string[] => ports.journal.events.map(event => event.type)
 
@@ -208,6 +220,60 @@ describe('durable ordering', () => {
     await expect(recovered.dispatch(ports.supervisor, 'spec', 'spec input', signal))
       .resolves.toMatchObject({ phase: 'plan' })
     expect(eventNames(ports)).toEqual(['orc/start', 'orc/route', 'orc/spec-request', 'orc/spec-result'])
+  })
+
+  it('cannot downgrade a resumed run whose log records a high classification', async () => {
+    const ports = fakePorts({ config: unmeasuredReview() })
+    const svc = new OrcService(ports)
+    await toReview(ports, svc)
+    expect(ports.journal.events[0]!.data).toMatchObject({ type: 'start', risk: { path: 'orc', risk: 'high' } })
+
+    // A restarted process over the same durable log, then a replay of the
+    // model-facing gate carrying a low-risk classification for the run.
+    const recovered = new OrcService({ ...ports, journal: ports.journal.recover() })
+    await recovered.start(ports.supervisor, { path: 'orc', risk: 'low', reasons: ['explicit-review'] })
+
+    // The recorded high classification still governs: the unmeasured review
+    // route is refused and is never dispatched, even though a clean report is
+    // waiting for it.
+    const runsBefore = ports.providers.runs.length
+    ports.reports.push(cleanReport)
+    await expect(recovered.dispatch(ports.supervisor, 'review', 'review task-1', signal))
+      .rejects.toThrow(/no-qualifying-route/)
+    expect(ports.providers.runs).toHaveLength(runsBefore)
+    const reviewDecisions = ports.journal.events
+      .filter(event => event.type === 'orc/route')
+      .map(event => event.data.decision)
+      .filter(decision => decision.stage === 'review')
+    expect(reviewDecisions).toHaveLength(0)
+    expect(ports.journal.events.at(-1)!.type).toBe('orc/fail')
+  })
+
+  it('cannot raise a resumed run whose log records a low classification', async () => {
+    const ports = fakePorts({ config: unmeasuredReview() })
+    const svc = new OrcService(ports)
+    await svc.start(ports.supervisor, { path: 'orc', risk: 'low', reasons: ['explicit-review'] })
+    await svc.dispatch(ports.supervisor, 'spec', 'spec input', signal)
+    await svc.dispatch(ports.supervisor, 'plan', 'plan input', signal)
+    const lead = await svc.createLead(ports.supervisor)
+    const peer = await svc.createPeer(lead, 'peer-1')
+    await svc.startTask(lead, peer, 'task-1')
+    await svc.settleTask(peer, 'task-1')
+
+    // A restarted process over the same durable log, then a replay that claims
+    // the run is high-risk. The recorded low classification still governs: the
+    // unmeasured review route is still admitted.
+    const recovered = new OrcService({ ...ports, journal: ports.journal.recover() })
+    await recovered.start(ports.supervisor, HIGH_RISK)
+
+    ports.reports.push(cleanReport)
+    await expect(recovered.dispatch(ports.supervisor, 'review', 'review task-1', signal))
+      .resolves.toMatchObject({ phase: 'audit' })
+    const review = ports.journal.events
+      .filter(event => event.type === 'orc/route')
+      .map(event => event.data.decision)
+      .find(decision => decision.stage === 'review')!
+    expect(review.risk).toMatchObject({ path: 'orc', risk: 'low' })
   })
 
   it('records a report against an already-committed request', async () => {
