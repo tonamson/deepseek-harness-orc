@@ -94,6 +94,40 @@ export function isFresh(record: BenchmarkEvidence, now: string, maxAgeDays: numb
   return ageMs >= 0 && ageMs <= maxAgeDays * MS_PER_DAY
 }
 
+/** Whether one record is admissible evidence for an exact route and version. */
+function isAdmissible(
+  record: BenchmarkEvidence,
+  backend: string,
+  route: Route,
+  version: string,
+  requiredScope: readonly string[],
+  now: string,
+  maxAgeDays: number,
+): boolean {
+  return record.backend === backend &&
+    record.model === route.model &&
+    record.effort === route.effort &&
+    record.backendVersion.length > 0 &&
+    record.backendVersion === version &&
+    record.suiteRevision === BENCHMARK_SUITE_REVISION &&
+    requiredScope.every(scope => record.scope.includes(scope)) &&
+    isFresh(record, now, maxAgeDays)
+}
+
+/**
+ * Order admissible records for one route: newest `date` first, then the
+ * highest validated detection, then the lowest false-positive score, then
+ * lexical `id`. Snapshot array position is never consulted, so the same
+ * records in any order select the same evidence (R25).
+ */
+const compareEvidence = (a: BenchmarkEvidence, b: BenchmarkEvidence): number => {
+  const age = Date.parse(b.date) - Date.parse(a.date)
+  if (age !== 0) return age
+  if (a.detectionScore !== b.detectionScore) return b.detectionScore - a.detectionScore
+  if (a.falsePositiveScore !== b.falsePositiveScore) return a.falsePositiveScore - b.falsePositiveScore
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
+}
+
 /**
  * The current benchmark record for an exact route, or `undefined` when the
  * route has no admissible evidence.
@@ -101,7 +135,8 @@ export function isFresh(record: BenchmarkEvidence, now: string, maxAgeDays: numb
  * Admission requires all of: an exact live catalog entry, a real and equal
  * non-empty backend version, the current suite revision on both snapshot and
  * record, the exact backend/model/effort, every required scope, and an age
- * within `maxAgeDays`.
+ * within `maxAgeDays`. Among several admissible runs for the same route the
+ * newest is selected — an older passing run never masks a newer failing one.
  */
 export function benchmarkMatches(
   benchmarks: BenchmarkSnapshot,
@@ -117,15 +152,9 @@ export function benchmarkMatches(
   // R22: an unknown live version can never match, so it can never qualify.
   if (version.length === 0) return undefined
   const backend = backendIdentity(route)
-  return benchmarks.records.find(record =>
-    record.backend === backend &&
-    record.model === route.model &&
-    record.effort === route.effort &&
-    record.backendVersion.length > 0 &&
-    record.backendVersion === version &&
-    record.suiteRevision === BENCHMARK_SUITE_REVISION &&
-    requiredScope.every(scope => record.scope.includes(scope)) &&
-    isFresh(record, now, maxAgeDays))
+  return benchmarks.records
+    .filter(record => isAdmissible(record, backend, route, version, requiredScope, now, maxAgeDays))
+    .sort(compareEvidence)[0]
 }
 
 /** The identity recorded on a decision that used this exact benchmark record. */

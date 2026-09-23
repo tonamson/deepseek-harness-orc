@@ -14,7 +14,7 @@
 
 import { routeKey } from '../../src/domain/config.js'
 import { backendIdentity, type BenchmarkSnapshot } from '../../src/domain/evidence.js'
-import { DEFAULT_CODE_ROUTE, selectRoute, type RouteDecision } from '../../src/domain/routing.js'
+import { selectRoute, type RouteDecision } from '../../src/domain/routing.js'
 import type { RiskDecision, RiskLevel } from '../../src/domain/risk.js'
 import type { CatalogSnapshot, OrcConfig, Route, Stage } from '../../src/domain/types.js'
 
@@ -24,8 +24,30 @@ export const NOW = '2026-09-23T00:00:00Z'
 /** The suite revision every fixture benchmark record claims. */
 export const SUITE_REVISION = 'orc-review-v1'
 
-/** The configured DeepSeek Flash v4.1 high route the code policy defaults to. */
-export const codeRoute: Route = { kind: 'provider', ...DEFAULT_CODE_ROUTE }
+/**
+ * The expected DeepSeek Flash v4.1 high route the code policy defaults to.
+ * Pinned as a literal, never spread from a production constant: a wrong model
+ * or effort constant in the source must fail the routing suite (R24).
+ */
+export const codeRoute: Route = {
+  kind: 'provider',
+  provider: 'deepseek',
+  model: 'deepseek-v4.1-flash',
+  effort: 'high',
+}
+
+/**
+ * The same DeepSeek Flash v4.1 high model under a different provider id, the
+ * one the plan ledger records for the live catalog (`bai`). No constant in the
+ * source names this provider, so selecting it as the code default proves the
+ * default is identified by model and effort, not by provider id (R24).
+ */
+export const otherProviderCodeRoute: Route = {
+  kind: 'provider',
+  provider: 'bai',
+  model: 'deepseek-v4.1-flash',
+  effort: 'high',
+}
 
 /** A provider route with no live backend version: never high-risk eligible. */
 export const planRoute: Route = { kind: 'provider', provider: 'custom', model: 'm1', effort: 'high' }

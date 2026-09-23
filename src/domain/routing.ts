@@ -33,12 +33,15 @@ import {
 import type { RiskDecision } from './risk.js'
 import type { AnalysisStage, CatalogSnapshot, OrcConfig, Route, Stage } from './types.js'
 
-/** The configured route the code policy defaults to when none is pinned. */
-export const DEFAULT_CODE_ROUTE = {
-  provider: 'deepseek',
-  model: 'deepseek-v4.1-flash',
-  effort: 'high',
-} as const
+/**
+ * The model the code policy defaults to when the user has pinned no route.
+ * The provider id is the user's configured choice, so the default is
+ * identified by model plus effort and never by a hardcoded provider (R24).
+ */
+export const DEFAULT_CODE_MODEL = 'deepseek-v4.1-flash'
+
+/** The reasoning effort the DeepSeek Flash v4.1 code default requires. */
+export const DEFAULT_CODE_EFFORT = 'high'
 
 /** Risk scopes a high-risk review or audit must have measured. */
 const REQUIRED_SCOPE = ['financial', 'security'] as const
@@ -146,16 +149,22 @@ function selectCodeRoute(
     if (!catalogHasExactModelEffort(catalog, configured)) throw new RouteError('no-code-route', 'code')
     return decision(configured, 'code', risk, config, catalog, benchmarks, now, 'configured code route')
   }
-  const fallback = config.allowed.find(route => isDefaultCodeRoute(route) && catalogHasExactModelEffort(catalog, route))
+  const fallback = config.allowed
+    .filter(route => isDefaultCodeRoute(route) && catalogHasExactModelEffort(catalog, route))
+    .sort(compareRouteKey)[0]
   if (fallback === undefined) throw new RouteError('no-code-route', 'code')
   return decision(fallback, 'code', risk, config, catalog, benchmarks, now, 'default DeepSeek Flash v4.1 high route')
 }
 
+/**
+ * Whether a route is the DeepSeek Flash v4.1 high route the code policy
+ * defaults to. Identity is model plus effort: the provider id is the user's to
+ * choose, so it is deliberately not compared (R24).
+ */
 const isDefaultCodeRoute = (route: Route): boolean =>
   route.kind === 'provider' &&
-  route.provider === DEFAULT_CODE_ROUTE.provider &&
-  route.model === DEFAULT_CODE_ROUTE.model &&
-  route.effort === DEFAULT_CODE_ROUTE.effort
+  route.model === DEFAULT_CODE_MODEL &&
+  route.effort === DEFAULT_CODE_EFFORT
 
 /** Manual honors the user's exact assignment, bounded by the allowlist and evidence. */
 function selectManualRoute(
@@ -258,8 +267,13 @@ const compareLeastCost = (a: Candidate, b: Candidate): number => {
   if (cost !== 0) return cost
   const latency = latencyOf(a.record) - latencyOf(b.record)
   if (latency !== 0) return latency
-  const left = routeKey(a.route)
-  const right = routeKey(b.route)
+  return compareRouteKey(a.route, b.route)
+}
+
+/** Total, reproducible tie-break: lexical `routeKey` ascending. */
+const compareRouteKey = (a: Route, b: Route): number => {
+  const left = routeKey(a)
+  const right = routeKey(b)
   return left < right ? -1 : left > right ? 1 : 0
 }
 

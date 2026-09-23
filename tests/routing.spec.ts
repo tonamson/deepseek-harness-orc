@@ -8,10 +8,11 @@
  */
 
 import { expect, it } from 'vitest'
-import type { BenchmarkSnapshot } from '../src/domain/evidence.js'
+import type { BenchmarkEvidence, BenchmarkSnapshot } from '../src/domain/evidence.js'
 import { routeKey } from '../src/domain/config.js'
 import type { RiskDecision } from '../src/domain/risk.js'
 import { selectRoute } from '../src/domain/routing.js'
+import type { CatalogSnapshot, Route } from '../src/domain/types.js'
 import {
   NOW,
   benchmarks,
@@ -20,12 +21,30 @@ import {
   codeRoute,
   codexRoute,
   config,
+  otherProviderCodeRoute,
   routeBackend,
   selectFixtureRoute,
 } from './fixtures/routes.js'
 
 const lowRisk: RiskDecision = { path: 'orc', risk: 'low', reasons: [] }
 const highRisk: RiskDecision = { path: 'orc', risk: 'high', reasons: ['high-impact'] }
+
+/** A catalog that additionally serves each given route with no backend version. */
+const catalogServing = (...routes: readonly Route[]): CatalogSnapshot => ({
+  ...catalog,
+  entries: [
+    ...catalog.entries,
+    ...routes.map(route => ({
+      routeKey: routeKey(route),
+      backendVersion: '',
+      model: route.model,
+      efforts: [route.effort],
+      accountAccess: true,
+      sourceUrl: '',
+      retrievedAt: NOW,
+    })),
+  ],
+})
 
 it('uses only allowed exact routes in Manual mode', () => {
   const selected = selectRoute('plan', { path: 'orc', risk: 'low', reasons: [] }, config('manual'), catalog, benchmarks, '2026-09-23T00:00:00Z')
@@ -95,6 +114,53 @@ it('breaks a fully equal tie by lexical routeKey', () => {
   const selected = selectRoute('audit', highRisk, config('auto'), catalog, identical, NOW)
   // cli:claude… sorts before cli:codex…, so the tie is reproducible.
   expect(routeBackend(selected.route)).toBe('claude')
+})
+
+it('selects the newest evidence for a route regardless of snapshot array order (R25)', () => {
+  const codex = benchmarks.records.find(record => record.backend === 'codex') as BenchmarkEvidence
+  const olderStronger = {
+    ...codex,
+    id: 'codex-high-older',
+    date: '2026-09-19T00:00:00Z',
+    detectionScore: 0.99,
+    falsePositiveScore: 0.01,
+    costUsd: 0.01,
+  }
+  const newerWeaker = {
+    ...codex,
+    id: 'codex-high-newer',
+    date: '2026-09-22T00:00:00Z',
+    detectionScore: 0.85,
+    falsePositiveScore: 0.15,
+    costUsd: 0.9,
+  }
+  const onlyCodex = { ...config('auto'), allowed: [codexRoute] }
+  const forward: BenchmarkSnapshot = { ...benchmarks, records: [olderStronger, newerWeaker] }
+  const reverse: BenchmarkSnapshot = { ...benchmarks, records: [newerWeaker, olderStronger] }
+  const first = selectRoute('audit', highRisk, onlyCodex, catalog, forward, NOW)
+  const second = selectRoute('audit', highRisk, onlyCodex, catalog, reverse, NOW)
+  expect(first.benchmarkId).toBe(`${benchmarks.id}/codex-high-newer`)
+  expect(second.benchmarkId).toBe(first.benchmarkId)
+  expect(second.estimatedCostUsd).toBe(0.9)
+})
+
+it('does not let an older passing run mask a newer failing one (R25)', () => {
+  const codex = benchmarks.records.find(record => record.backend === 'codex') as BenchmarkEvidence
+  const newerFailing: BenchmarkSnapshot = {
+    ...benchmarks,
+    records: [
+      ...benchmarks.records,
+      {
+        ...codex,
+        id: 'codex-high-newer-failing',
+        date: '2026-09-22T00:00:00Z',
+        detectionScore: 0.5,
+        falsePositiveScore: 0.5,
+      },
+    ],
+  }
+  const onlyCodex = { ...config('auto'), allowed: [codexRoute] }
+  expect(() => selectRoute('audit', highRisk, onlyCodex, catalog, newerFailing, NOW)).toThrow(/no-qualifying-route/)
 })
 
 it('chooses the least costly eligible route for a low-risk stage', () => {
@@ -169,9 +235,38 @@ it('records the catalog, benchmark, risk, reason, and cost on the decision', () 
 })
 
 it('selects the configured DeepSeek Flash v4.1 high route for code', () => {
+  // The expected route is a literal fixture value, not spread from a production
+  // constant, so a wrong model/effort constant fails this test (R24).
+  expect(codeRoute).toEqual({
+    kind: 'provider',
+    provider: 'deepseek',
+    model: 'deepseek-v4.1-flash',
+    effort: 'high',
+  })
   const selected = selectRoute('code', lowRisk, config('auto'), catalog, benchmarks, NOW)
   expect(selected.route).toEqual(codeRoute)
   expect(selected.benchmarkId).toBeNull()
+})
+
+it('finds the code default by model and effort, not by provider id (R24)', () => {
+  const onlyOtherProvider = { ...config('auto'), allowed: [otherProviderCodeRoute] }
+  const selected = selectRoute(
+    'code',
+    lowRisk,
+    onlyOtherProvider,
+    catalogServing(otherProviderCodeRoute),
+    benchmarks,
+    NOW,
+  )
+  expect(selected.route).toEqual(otherProviderCodeRoute)
+  expect(selected.route.kind === 'provider' && selected.route.provider).toBe('bai')
+})
+
+it('does not treat a different effort on the default model as the code default (R24)', () => {
+  const lowEffort: Route = { kind: 'provider', provider: 'bai', model: 'deepseek-v4.1-flash', effort: 'low' }
+  const onlyLowEffort = { ...config('auto'), allowed: [lowEffort] }
+  expect(() => selectRoute('code', lowRisk, onlyLowEffort, catalogServing(lowEffort), benchmarks, NOW))
+    .toThrow(/select or configure/)
 })
 
 it('honors an explicitly configured code route', () => {

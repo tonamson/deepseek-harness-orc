@@ -85,6 +85,49 @@ it('matches a benchmark record to an exact route and catalog version', () => {
   expect(benchmarkIdentity(benchmarks, codexRecord)).toBe(`${benchmarks.id}/codex-high`)
 })
 
+it('selects the newest admissible record regardless of snapshot array order (R25)', () => {
+  const olderStronger: BenchmarkEvidence = {
+    ...codexRecord,
+    id: 'codex-older',
+    date: '2026-09-19T00:00:00Z',
+    detectionScore: 0.95,
+    falsePositiveScore: 0.05,
+  }
+  const newerWeaker: BenchmarkEvidence = {
+    ...codexRecord,
+    id: 'codex-newer',
+    date: '2026-09-22T00:00:00Z',
+    detectionScore: 0.81,
+    falsePositiveScore: 0.19,
+  }
+  const olderFirst: BenchmarkSnapshot = { ...benchmarks, records: [olderStronger, newerWeaker] }
+  const newerFirst: BenchmarkSnapshot = { ...benchmarks, records: [newerWeaker, olderStronger] }
+  expect(benchmarkMatches(olderFirst, codexRoute, catalog, NOW, SCOPE, MAX_AGE_DAYS)?.id).toBe('codex-newer')
+  expect(benchmarkMatches(newerFirst, codexRoute, catalog, NOW, SCOPE, MAX_AGE_DAYS)?.id).toBe('codex-newer')
+})
+
+it('breaks equal-date evidence by detection, then false positives, then lexical id (R25)', () => {
+  const date = '2026-09-22T00:00:00Z'
+  const weak: BenchmarkEvidence = { ...codexRecord, id: 'codex-b', date, detectionScore: 0.8, falsePositiveScore: 0.1 }
+  const strong: BenchmarkEvidence = { ...codexRecord, id: 'codex-b', date, detectionScore: 0.9, falsePositiveScore: 0.2 }
+  const strongLowFp: BenchmarkEvidence = { ...codexRecord, id: 'codex-a', date, detectionScore: 0.9, falsePositiveScore: 0.05 }
+  const snapshot = (records: BenchmarkEvidence[]): BenchmarkSnapshot => ({ ...benchmarks, records })
+  expect(benchmarkMatches(snapshot([weak, strong]), codexRoute, catalog, NOW, SCOPE, MAX_AGE_DAYS)?.id).toBe('codex-b')
+  expect(benchmarkMatches(snapshot([strong, weak]), codexRoute, catalog, NOW, SCOPE, MAX_AGE_DAYS)?.id).toBe('codex-b')
+  expect(benchmarkMatches(snapshot([strong, strongLowFp]), codexRoute, catalog, NOW, SCOPE, MAX_AGE_DAYS)?.id).toBe('codex-a')
+  expect(benchmarkMatches(snapshot([strongLowFp, strong]), codexRoute, catalog, NOW, SCOPE, MAX_AGE_DAYS)?.id).toBe('codex-a')
+  const twinA: BenchmarkEvidence = { ...strongLowFp, id: 'codex-a' }
+  const twinB: BenchmarkEvidence = { ...strongLowFp, id: 'codex-b' }
+  expect(benchmarkMatches(snapshot([twinB, twinA]), codexRoute, catalog, NOW, SCOPE, MAX_AGE_DAYS)?.id).toBe('codex-a')
+  expect(benchmarkMatches(snapshot([twinA, twinB]), codexRoute, catalog, NOW, SCOPE, MAX_AGE_DAYS)?.id).toBe('codex-a')
+})
+
+it('ignores admissible records for other routes when selecting evidence', () => {
+  const claudeRecord = benchmarks.records.find(record => record.backend === 'claude') as BenchmarkEvidence
+  const mixed: BenchmarkSnapshot = { ...benchmarks, records: [claudeRecord, codexRecord] }
+  expect(benchmarkMatches(mixed, codexRoute, catalog, NOW, SCOPE, MAX_AGE_DAYS)?.id).toBe('codex-high')
+})
+
 it('requires a real, non-empty, equal backend version (R22)', () => {
   expect(matchesCodex(benchmarks, withCatalogVersion(''))).toBe(false)
   expect(matchesCodex(withCodexRecord({ backendVersion: '' }))).toBe(false)
