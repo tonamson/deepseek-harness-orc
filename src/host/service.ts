@@ -226,17 +226,19 @@ export class OrcService {
    * start record, so a resumed service routes a run whose log holds nothing but
    * its start.
    *
-   * A run whose log predates that record has no durable classification: the
-   * replayed gate is then the only surviving one, so it heals the run instead
-   * of leaving every later dispatch with nothing to route on. A classification
-   * that does not call for ORC never installs one.
+   * A run whose log carries no classification at all — a legacy start record
+   * with no `risk` field and no committed route decision — has nothing durable
+   * to route on: the replayed gate is then the only surviving one, so it heals
+   * the run instead of leaving every later dispatch with nothing to route on.
+   * A classification that does not call for ORC never installs one.
    *
-   * The heal is gated on the durable record, not on process memory: a fresh
+   * The heal is gated on the durable log, not on process memory: a fresh
    * service over a resumed log has an empty in-memory map, so a replay carrying
    * a low-risk classification would otherwise replace — or raise — the
-   * classification the run recorded before `riskOf` ever consults it. Once a
-   * classification is durable for a run, nothing overwrites it in either
-   * direction.
+   * classification the run recorded before `riskOf` ever consults it. A run's
+   * durable classification is either its start record's `risk` field or its
+   * first committed route decision; while either exists, nothing overwrites it
+   * in either direction.
    *
    * @throws when the classification does not call for ORC at all.
    */
@@ -247,7 +249,10 @@ export class OrcService {
       const state = this.ports.journal.state(supervisor.session)
       if (state.started) {
         const durable = this.ports.journal.risk(supervisor.session)
-        if (durable === null && !this.risks.has(runId) && risk.path === 'orc') this.risks.set(runId, risk)
+        // A classification is durable through either source: the start record's
+        // `risk` field, or the run's first committed route decision.
+        const classified = durable !== null || this.ports.journal.decisions(supervisor.session).length > 0
+        if (!classified && !this.risks.has(runId) && risk.path === 'orc') this.risks.set(runId, risk)
         return state
       }
       if (risk.path !== 'orc') {
