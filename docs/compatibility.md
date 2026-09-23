@@ -1,11 +1,11 @@
 # DSH compatibility contract
 
-Status: Task 1 compatibility gate, revised by controller ruling **R15**. This
-document records what the **packed** DSH `0.1.6-alpha.2` packages actually
-expose, so later tasks can rely on verified signatures instead of the plan's
-assumptions. It is a verification record, not a redesign: later tasks keep
-their assigned scope, and any mismatch is listed under
-[Concerns](#concerns-handed-to-later-tasks).
+Status: Task 1 compatibility gate, revised by controller ruling **R15**; host CLI
+adapter section added by Task 6. This document records what the **packed** DSH
+`0.1.6-alpha.2` packages actually expose, so later tasks can rely on verified
+signatures instead of the plan's assumptions. It is a verification record, not a
+redesign: later tasks keep their assigned scope, and any mismatch is listed
+under [Concerns](#concerns-handed-to-later-tasks).
 
 ## Verified environment
 
@@ -176,6 +176,81 @@ onChange, validate })` call shape and
 `ctx.settingsScope.bind({ namespace: 'orc' })` both type-check against these
 declarations. The plan's settings design therefore stands unchanged.
 
+## Host CLI adapter gate (Task 6)
+
+Task 6 is the first task to import `@deepseek-ai/dsh-subprocess` at runtime, so
+by ruling **R17** the package is now a `peerDependencies` entry pinned to exactly
+`"0.1.6-alpha.2"` (it was already a `devDependencies` entry, so
+`package-lock.json` changes only by that one added peer line).
+
+### Verified `ctx.subprocess` surface the adapter consumes
+
+Read from the installed `node_modules/@deepseek-ai/dsh-subprocess/lib/types/`
+declarations (the same files the Task 1 gate cites at
+`lib/types/index.d.ts:88`/`:102` and `lib/types/types.d.ts:69`/`:156`):
+
+| Call | Exact shape used |
+|---|---|
+| `resolveExecutable` | `resolveExecutable(command: string, env?: Readonly<Record<string, string>>, signal?: AbortSignal): Promise<string>`. The adapter passes the explicit `cliPaths` value when one is configured, otherwise the bare `codex`/`claude` name, and always passes `undefined` for `env` and the caller's `signal`. |
+| `spawn` | `spawn(spec: SubprocessSpawnSpec): SubprocessHandle`, with `{ argv, cwd, stdio: { stdin: 'ignore', stdout: { maxBytes: 1_048_576 }, stderr: { maxBytes: 16_384 } }, graceMs: 5_000, signal }` exactly as the plan pins it. No `env` is passed, so the child inherits the service's own scrubbed parent environment. |
+| outcome | `done: Promise<SubprocessOutcome>` is awaited first, then `waitForExit(): Promise<boolean>`, then `collected.stdout`/`collected.stderr` are read with `readFrom(0)`. `terminate()` is called when `done` rejects. |
+
+`collected` readers are offset-based and non-consuming, and a read is `lossy`
+only when the requested offset slid out of the retained tail. The adapter
+rejects a lossy **stdout** read, because that stream carries the protocol record
+(JSONL/JSON) it must parse. A lossy **stderr** read is kept as a diagnostic tail
+(the DSH declarations describe a `SubprocessCollect` without `spill` as exactly
+"the diagnostic-tail shape") and is fatal only where a verdict must be read from
+stderr — the Codex auth probe, which is the one documented interface that
+reports on stderr.
+
+### Official CLI reference recheck
+
+Rechecked 2026-09-23, before writing the probe commands, against:
+
+- Codex CLI: <https://github.com/openai/codex> — the CLI source at
+  `codex-rs/cli/src/main.rs` and `codex-rs/cli/src/login.rs`, and the JSONL event
+  vocabulary at `codex-rs/exec/src/exec_events.rs`.
+- Claude Code: <https://code.claude.com/docs/en/cli-reference>, plus
+  <https://code.claude.com/docs/en/headless> and
+  <https://code.claude.com/docs/en/agent-sdk/python>.
+
+| Probe | Documented shape | Verdict |
+|---|---|---|
+| `codex --version` | clap `#[clap(version, bin_name = "codex")]` prints `codex <semver>` on stdout (`codex-rs/cli/src/main.rs`). | **Matches** the plan's `codex 0.156.1` shape. |
+| `codex login status` | `LoginSubcommand::Status` → `run_login_status` writes the verdict with `eprintln!` to **stderr** and exits `0` when signed in, `1` when not (`codex-rs/cli/src/login.rs`). Signed-in lines include `Logged in using ChatGPT` and `Logged in using an API key - sk-proj-***ABCDE`; signed-out is `Not logged in`. | Command **matches**; the stream is stderr, not stdout (recorded below). |
+| `codex exec --json` | JSONL events `#[serde(tag = "type")]`: `thread.started`, `turn.started`, `turn.completed` (with `usage`), `turn.failed` (with `error.message`), `item.started`, `item.updated`, `item.completed`, `error` (`exec_events.rs`). `ThreadItem` is `{ id, #[serde(flatten)] details }` with `ThreadItemDetails` tagged `rename_all = "snake_case"`, so an agent answer is `{"type":"item.completed","item":{"id":…,"type":"agent_message","text":…}}`. | **Matches**; the fixtures emit exactly this. Non-fatal warnings arrive as `item.completed` items of `type: "error"` (`collect_warning`), not as top-level `error` events, so only `turn.failed`/`error` are fatal. |
+| `claude --version` | The CLI reference documents a version flag, but the fetched page truncates that row; the exact stdout could not be confirmed from the official page. | Command **matches** the plan; output shape is recorded below as a concern. |
+| `claude auth status` | "Show authentication status as JSON. Use `--text` for human-readable output. Exits with code 0 if logged in, 1 if not" (`cli-reference`). The payload is camelCase — `loggedIn`, `authMethod`, `apiProvider`, `email`, `orgId`, `orgName`, `subscriptionType` — and signed out is exit 1 **with valid JSON** (`{"loggedIn":false,"authMethod":"none","apiProvider":"firstParty"}`). | Command **matches**; the fixtures emit this payload, and the adapter reads `loggedIn` rather than treating exit 1 as unreadable output. |
+| `claude -p <prompt> --output-format json --model <m> --effort <e>` | `--print`/`-p` runs non-interactively; `--output-format` accepts `text`, `json`, `stream-json`; with `json` the payload is "structured JSON with result, session ID, and metadata" and the text is in the `result` field (`headless`). `--effort` accepts `low`, `medium`, `high`, `xhigh`, `max`, `ultracode`; `--model` sets the model (`cli-reference`). | **Matches** the plan's argv, including `--effort high`. |
+| Claude result completion status | The Agent SDK checks `message.subtype == "success"` for a successful completion (`agent-sdk/python`, `receive_response`), and `ResultMessage` carries `subtype`, `is_error`, and `result`. The official `anthropics/claude-code-action` commit *"fix(sdk): fail step when result has is_error:true despite success subtype"* confirms `is_error: true` can accompany `subtype: "success"`. | The adapter accepts `result` only when `subtype === 'success'` **and** `is_error !== true`, and rejects the contradictory pair as `invalid-result`. |
+
+### Contradictions with the plan's pinned assertions
+
+**R11 keeps the plan's exact argv arrays and the Step 1 parser contract.** The
+two pinned `*Argv` assertions were rechecked against the documented flags above
+and hold byte-for-byte, so no assertion was changed. One documented output shape
+does conflict with the Step 1 version table:
+
+1. **`claude --version` output shape (unresolved, controller ruling requested).**
+   The Step 1 table pins the accepted form as the product-prefixed
+   `claude 2.1.280`. Observed Claude Code prints the version followed by a
+   parenthesised product name — `2.1.280 (Claude Code)` — which the pinned
+   parser correctly rejects as trailing text, and the official CLI reference
+   page truncated the `--version` row so the exact stdout is not confirmable
+   from that source. Under R11 nothing was changed silently: the parser keeps
+   the pinned `<product> <semver>[-prerelease]` contract, the fixture emits that
+   supported shape, and this record is the contradiction. **Recommendation:** if
+   the controller wants the real Claude stdout accepted, extend
+   `parseCliVersion` to accept an optional exact ` (Claude Code)` suffix for
+   `claude` only; every pinned Step 1 assertion still passes and `v0.156.1
+   garbage` still throws.
+2. **`codex login status` reports on stderr, not stdout.** The plan pins the
+   command but no stream, so this is not a contradicted assertion; it is an
+   implementation constraint now recorded. The adapter reads the verdict from
+   stderr with a stdout fallback, and the pinned `stderr: { maxBytes: 16_384 }`
+   collect limit is sufficient for the one-line verdict.
+
 ## Concerns handed to later tasks
 
 These are recorded here as gate output. Task 1 does not change later tasks.
@@ -226,3 +301,23 @@ These are recorded here as gate output. Task 1 does not change later tasks.
    `npm_config_cache="$PWD/.npm-cache"` (R2); `.npm-cache/` is gitignored (R3).
    Pre-existing untracked `.serena/` and `docs/superpowers/plans/` were left
    alone as outside this task's commit list.
+9. **Task 9 — a missing CLI executable has no dedicated code.** The six-code
+   contract has no not-found bucket, so `CliAdapter.probe` reports an
+   unresolvable or unstartable executable as `unsupported-protocol`, with the
+   redacted resolution diagnostic naming the executable. If the settings page
+   needs to render "not installed" differently from "capability mismatch", the
+   controller should add a seventh code rather than overload this one.
+10. **Task 8 — `CliAdapter.catalog(cli, routes, signal)` carries no CLI path.**
+    The pinned signature has no `path` parameter, so the catalog discovers the
+    executable on `PATH` and cannot honour `config.cliPaths`. Threading an
+    explicit path into the catalog is a Task 8 concern; the pinned interface was
+    not changed here.
+11. **Task 8 — `CliAdapter.probe(route, path, signal)` carries no `cwd`.** The
+    pinned signature has no working directory, so version, auth-status, and the
+    harmless capability prompt all run in the harness working directory.
+12. **A green probe is held in adapter memory, keyed by route key.** `probe`
+    records it and `run` re-inspects the live identity (path, parsed version,
+    auth/account fingerprint) and refuses a moved revision before dispatch. A
+    fresh `CliAdapter` therefore has no green probe and `run` rejects until
+    `probe` or `catalog` has succeeded; Task 8 must persist or re-derive that
+    evidence if a probe is expected to survive a process restart.
