@@ -1,0 +1,161 @@
+{
+  "tool": {
+    "name": "orc",
+    "description": "Record and drive an ORC workflow run for this session. Use `classify` to apply the ORC risk policy and `start` to open the run for substantial or high-impact work. Lead, peer, task, review, audit, fix, and completion actions drive the run; the ORC service validates every authority and phase rule.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "description": "The ORC action to perform.",
+          "enum": [
+            "classify",
+            "start",
+            "status",
+            "create-lead",
+            "create-peer",
+            "start-task",
+            "settle-task",
+            "dispatch",
+            "fix",
+            "dismiss",
+            "final-review",
+            "final-audit",
+            "complete"
+          ]
+        },
+        "request": {
+          "type": "string",
+          "description": "classify/start: the request text the risk policy classifies."
+        },
+        "plannedFiles": {
+          "type": "integer",
+          "description": "classify/start: planned file count; only exactly 1 may stay direct."
+        },
+        "architectureChange": {
+          "type": "boolean",
+          "description": "classify/start: whether the request changes architecture."
+        },
+        "explicitPlanOrReview": {
+          "type": "boolean",
+          "description": "classify/start: whether the user asked for a plan or review."
+        },
+        "discoveredRisk": {
+          "type": "boolean",
+          "description": "classify/start: set when direct work revealed substantial scope or high risk."
+        },
+        "peerName": {
+          "type": "string",
+          "description": "create-peer: the peer name."
+        },
+        "peerId": {
+          "type": "string",
+          "description": "start-task: the peer the task is assigned to."
+        },
+        "taskId": {
+          "type": "string",
+          "description": "start-task/settle-task: the task identifier."
+        },
+        "findingId": {
+          "type": "string",
+          "description": "fix/dismiss: the finding identifier."
+        },
+        "stage": {
+          "type": "string",
+          "description": "dispatch: the stage to route and run.",
+          "enum": [
+            "code",
+            "spec",
+            "plan",
+            "review",
+            "audit"
+          ]
+        },
+        "prompt": {
+          "type": "string",
+          "description": "dispatch: the work the stage receives."
+        },
+        "reason": {
+          "type": "string",
+          "description": "dismiss: why the finding does not block."
+        },
+        "report": {
+          "description": "final-review/final-audit: the review or audit report payload."
+        }
+      },
+      "required": [
+        "action"
+      ]
+    }
+  },
+  "policy": "## ORC workflow\nClassify every request before implementing it, and use the `orc` tool to record the decision.\n\n- Small, isolated, low-risk work — a typo, a small documentation correction, one contained visual adjustment — may be handled directly, without ORC state.\n- Multi-step, multi-file, architectural, explicitly planned, or explicitly reviewed work starts ORC.\n- Money movement, balances, payments, authentication, authorization, security-sensitive behavior, and similarly high-impact paths always start ORC, however small the diff.\n- If direct work reveals substantial scope or high risk before implementation, classify it again with `discoveredRisk` set, start ORC, and only then continue implementing.\n\nOnce ORC starts, this session is the Supervisor of an ORC run: the run's Lead owns tasks, reviews, and fixes; Peers implement. The ORC service validates role authority, phase order, task settlement, review and audit results, fixes, and completion — a phase or authority refusal is final until the state that caused it changes.\nReview and security audit are separate stages. Critical, high, and medium findings block until they are fixed and re-reviewed. A failed, malformed, missing, or unavailable review or audit is blocking and is never a clean result.",
+  "classification": {
+    "direct": {
+      "action": "classify",
+      "status": "not-started",
+      "path": "direct",
+      "risk": "low",
+      "reasons": [
+        "isolated-low-risk"
+      ],
+      "leadId": "",
+      "peers": [],
+      "tasks": [],
+      "findings": [],
+      "taskGate": "open",
+      "finalReview": "none",
+      "finalAudit": "none",
+      "message": "classified as direct"
+    },
+    "escalated": {
+      "action": "start",
+      "status": "spec",
+      "path": "orc",
+      "risk": "high",
+      "reasons": [
+        "high-impact"
+      ],
+      "leadId": "",
+      "peers": [],
+      "tasks": [],
+      "findings": [],
+      "taskGate": "open",
+      "finalReview": "none",
+      "finalAudit": "none",
+      "message": "ORC run started for session-supervisor"
+    }
+  },
+  "routeDecision": {
+    "route": {
+      "kind": "provider",
+      "provider": "custom",
+      "model": "m1",
+      "effort": "high"
+    },
+    "stage": "spec",
+    "risk": {
+      "path": "orc",
+      "risk": "high",
+      "reasons": [
+        "high-impact"
+      ]
+    },
+    "catalogId": "orc@2026-09-23T00:00:00Z",
+    "benchmarkId": null,
+    "reason": "auto: least costly route meeting the spec quality floor",
+    "estimatedCostUsd": 0
+  },
+  "blocked": {
+    "message": "transport",
+    "event": {
+      "version": 1,
+      "runId": "session-supervisor",
+      "actorId": "session-supervisor",
+      "actor": "service",
+      "at": "2026-09-23T00:00:00Z",
+      "type": "fail",
+      "reason": "plan dispatch failed: the selected backend failed"
+    },
+    "phase": "failed"
+  }
+}

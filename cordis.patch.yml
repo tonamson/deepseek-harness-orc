@@ -1,3 +1,18 @@
+# The ORC bundle patch: one Host row for the ORC service and its Agent-facing
+# capability, and one row for the Remote face the Web settings page reads.
+#
+# `inject: [settings]` makes the settings provider a load-time dependency of the
+# Host row: a profile that applies `dsh-settings` later must not load ORC first,
+# because the ORC settings section has to be installed while the plugin starts.
+#
+# The Remote row injects `orc`, so the wire face exists only while the service
+# does, and unmounting the bundle removes both.
+
 - insert:
     - id: orc-host
       name: '@tonamson/dsh-orc'
+      inject: [settings]
+
+    - id: orc-remote-host
+      name: '@tonamson/dsh-orc/remote-host'
+      inject: [orc]
