@@ -102,6 +102,9 @@ namespace. It configures:
   backend never reaches one;
 - allowed backends, and **Manual** per-stage assignments (spec, plan, review,
   audit) or **Auto** routing;
+- a free-text **route entry**, so the page can allowlist a route the live
+  catalog cannot discover yet — including on a fresh install, where nothing is
+  discoverable and no route is configured;
 - DSH provider/model references or a Codex/Claude Code CLI selection;
 - a CLI executable path when it is not discoverable on `PATH`, plus the CLI
   health/authentication result;
@@ -133,6 +136,13 @@ unsupported CLI versions, failed capability probes, and missing authentication
 are shown as actionable errors. A failure after a successful test stays a task
 failure: ORC never silently switches to another provider, model, or CLI, and it
 never falls back to a packaged runtime.
+
+A **route refusal** is not a run failure. When no allowed route meets a stage's
+evidence, cost, or independence rule, the stage stops with an actionable
+`no-qualifying-route` / `no-independent-route` / `no-code-route` error and the
+run keeps its phase, so you can configure a route or generate the missing
+evidence and dispatch the same stage again — no restart, and no lost work. Every
+other routing failure, such as a provider discovery fault, remains blocking.
 
 ## Benchmark evidence
 
@@ -234,7 +244,13 @@ The smoke script packs the bundle, installs it into a disposable Web profile
 through `dsh plugin`, boots that profile headlessly (ephemeral port, no browser)
 to drive the real Plugin Manager enable/disable operations and their
 restart-required reporting, exercises removal, and drives the complete ORC
-workflow with keyless fake inputs. It never calls a model provider.
+workflow with keyless fake inputs. It never calls a model provider, and it
+cleans up the directory it created on failure as well as on success. `dsh plugin`
+forwards to pnpm, so pnpm must be on `PATH`; CI provisions an explicitly pinned
+version (`.github/workflows/ci.yml`) rather than relying on the runner image.
+
+`tests/integration/*` exercise the packed archive, so they build `lib/` before
+packing — `npm test` is self-contained and never tests a stale build.
 
 ## Publishing
 

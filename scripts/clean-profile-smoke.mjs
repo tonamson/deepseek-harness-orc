@@ -504,7 +504,10 @@ async function driveWorkflow(serviceModule, workflowModule, journalModule) {
     findings: [{ id: 'F-1', severity: 'medium', file: 'src/pay.ts', line: 12, evidence: 'double credit', remediation: 'settle once' }],
   }
   const cleanReport = { status: 'clean', findings: [] }
-  const reports = [mediumReport, cleanReport, cleanReport]
+  // Five routed dispatches: the blocking review, the re-review, the task audit,
+  // and then the final branch review and audit, which ORC routes and dispatches
+  // itself rather than accepting a report from its caller.
+  const reports = [mediumReport, cleanReport, cleanReport, cleanReport, cleanReport]
   const { service, supervisor } = fakeDeployment(serviceModule, workflowModule, journalModule, reports)
   const signal = new AbortController().signal
   const high = { path: 'orc', risk: 'high', reasons: ['high-impact'] }
@@ -529,8 +532,8 @@ async function driveWorkflow(serviceModule, workflowModule, journalModule) {
   await service.fix(lead, 'F-1')
   await service.dispatch(supervisor, 'review', 'review task-1 again', signal)
   await service.dispatch(supervisor, 'audit', 'audit task-1', signal)
-  await service.finalBranchReview(supervisor, cleanReport)
-  await service.finalBranchAudit(supervisor, cleanReport)
+  await service.finalBranchReview(supervisor, 'final branch review', signal)
+  await service.finalBranchAudit(supervisor, 'final branch audit', signal)
   const completed = await service.complete(supervisor)
   if (completed.phase !== 'completed') fail(`the workflow did not complete: phase is ${completed.phase}`)
   return completed

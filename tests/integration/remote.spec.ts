@@ -7,27 +7,29 @@
  * - `OrcRemoteHost` is a `TypertRemoteService` bound to the `orc` namespace;
  * - its three `@Remote` methods delegate to the injected `ctx.orc` service and
  *   return JSON-safe, credential-free values;
- * - the decorators recorded the wire contract on the class prototype, which is
- *   the input the Typert generator models;
+ * - the decorators recorded the wire contract on the class prototype, and the
+ *   client contribution this bundle mounts by hand declares exactly that same
+ *   three-endpoint contract, so the two halves cannot drift;
  * - the `orc-remote-host` Loader row and the `./remote-host` package export
  *   resolve, and the module default-exports the class a Loader row mounts.
  *
- * What is NOT proved, and cannot be from outside DSH: the generated
- * `lib/typert.host.js` / `lib/typert.remote-client.js` artifacts that make
- * `ctx.remote.orc.getCatalog()` callable over the wire. The published
+ * The generated `lib/typert.host.js` / `lib/typert.remote-client.js` artifacts
+ * do not exist, and are not needed: the host face is served by the Gateway's
+ * source-mode discovery over the `@Remote` markers, and the client face is the
+ * hand-written contribution `src/client/remote.ts` mounts through the public
+ * `ctx.remote.$mount(...)`. The published
  * `@deepseek-ai/dsh-typert-generator@0.1.6-alpha.2` binds generation to a
  * workspace root with host/client face aggregate tsconfigs and only registers
  * packages under `<root>/packages`, so it cannot emit artifacts for a single
- * external package. The attempt, its exact error, and the published package's
- * real surface are recorded in the task report; no `./typert` or `./remote`
- * export is declared, because the typert-loader fails loud on a declared but
- * missing artifact.
+ * external package; no `./typert` or `./remote` export is declared, because the
+ * typert-loader fails loud on a declared but missing artifact.
  */
 
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { remoteMethods } from '@deepseek-ai/dsh-typert-protocol'
+import { ORC_REMOTE_CONTRIBUTION, ORC_REMOTE_NAMESPACE } from '../../src/client/remote.js'
 import type { CatalogSnapshot } from '../../src/domain/types.js'
 import type { OrcConnection, OrcService } from '../../src/host/service.js'
 import { OrcRemoteHost } from '../../src/host/remote-host.js'
@@ -127,6 +129,28 @@ describe('OrcRemoteHost', () => {
       { method: 'probe', invocation: { kind: 'direct' } },
       { method: 'getConnectionResult', invocation: { kind: 'direct' } },
     ])
+  })
+
+  it('declares a client contribution that matches the host markers endpoint for endpoint', () => {
+    const ctx = new Context()
+    const { service } = fakeService()
+    ctx.provide('orc', service)
+    const host = new OrcRemoteHost(ctx)
+    const endpoints = remoteMethods(host).map(marker => `${ORC_REMOTE_NAMESPACE}/${marker.exportName ?? marker.method}`)
+    const declared = ORC_REMOTE_CONTRIBUTION.descriptors.map(descriptor => `${descriptor.namespace}/${descriptor.method}`)
+
+    // The hand-written contribution is the client half of this exact host
+    // contract: a renamed or added host endpoint must fail here.
+    expect(declared).toEqual(endpoints)
+    expect(ORC_REMOTE_CONTRIBUTION.package).toBe(pkg.name)
+    // `getCatalog` and `probe` take the host's trailing cancellation parameter;
+    // `getConnectionResult` is unary.
+    expect(ORC_REMOTE_CONTRIBUTION.descriptors.map(descriptor => descriptor.cancellation !== undefined))
+      .toEqual([true, true, false])
+    // Every input codec is strict, which the client Gateway requires.
+    for (const descriptor of ORC_REMOTE_CONTRIBUTION.descriptors) {
+      for (const parameter of descriptor.parameters) expect(parameter.codec.mode).toBe('strict')
+    }
   })
 
   it('is the module default export a Loader row mounts', async () => {
