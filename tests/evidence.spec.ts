@@ -108,18 +108,31 @@ it('selects the newest admissible record regardless of snapshot array order (R25
 
 it('breaks equal-date evidence by detection, then false positives, then lexical id (R25)', () => {
   const date = '2026-09-22T00:00:00Z'
-  const weak: BenchmarkEvidence = { ...codexRecord, id: 'codex-b', date, detectionScore: 0.8, falsePositiveScore: 0.1 }
-  const strong: BenchmarkEvidence = { ...codexRecord, id: 'codex-b', date, detectionScore: 0.9, falsePositiveScore: 0.2 }
-  const strongLowFp: BenchmarkEvidence = { ...codexRecord, id: 'codex-a', date, detectionScore: 0.9, falsePositiveScore: 0.05 }
   const snapshot = (records: BenchmarkEvidence[]): BenchmarkSnapshot => ({ ...benchmarks, records })
-  expect(benchmarkMatches(snapshot([weak, strong]), codexRoute, catalog, NOW, SCOPE, MAX_AGE_DAYS)?.id).toBe('codex-b')
-  expect(benchmarkMatches(snapshot([strong, weak]), codexRoute, catalog, NOW, SCOPE, MAX_AGE_DAYS)?.id).toBe('codex-b')
-  expect(benchmarkMatches(snapshot([strong, strongLowFp]), codexRoute, catalog, NOW, SCOPE, MAX_AGE_DAYS)?.id).toBe('codex-a')
-  expect(benchmarkMatches(snapshot([strongLowFp, strong]), codexRoute, catalog, NOW, SCOPE, MAX_AGE_DAYS)?.id).toBe('codex-a')
-  const twinA: BenchmarkEvidence = { ...strongLowFp, id: 'codex-a' }
-  const twinB: BenchmarkEvidence = { ...strongLowFp, id: 'codex-b' }
-  expect(benchmarkMatches(snapshot([twinB, twinA]), codexRoute, catalog, NOW, SCOPE, MAX_AGE_DAYS)?.id).toBe('codex-a')
-  expect(benchmarkMatches(snapshot([twinA, twinB]), codexRoute, catalog, NOW, SCOPE, MAX_AGE_DAYS)?.id).toBe('codex-a')
+  const pick = (records: BenchmarkEvidence[]): string | undefined =>
+    benchmarkMatches(snapshot(records), codexRoute, catalog, NOW, SCOPE, MAX_AGE_DAYS)?.id
+
+  // Detection decides: the higher score wins even though its id is lexically
+  // later and its false-positive score is worse, so neither of those keys can
+  // be what selected it.
+  const weaker: BenchmarkEvidence = { ...codexRecord, id: 'codex-a', date, detectionScore: 0.8, falsePositiveScore: 0.1 }
+  const stronger: BenchmarkEvidence = { ...codexRecord, id: 'codex-b', date, detectionScore: 0.9, falsePositiveScore: 0.2 }
+  expect(pick([weaker, stronger])).toBe('codex-b')
+  expect(pick([stronger, weaker])).toBe('codex-b')
+
+  // Equal detection: the lower false-positive score wins, again against the
+  // lexical order.
+  const noisier: BenchmarkEvidence = { ...codexRecord, id: 'codex-a', date, detectionScore: 0.9, falsePositiveScore: 0.2 }
+  const cleaner: BenchmarkEvidence = { ...codexRecord, id: 'codex-b', date, detectionScore: 0.9, falsePositiveScore: 0.05 }
+  expect(pick([noisier, cleaner])).toBe('codex-b')
+  expect(pick([cleaner, noisier])).toBe('codex-b')
+
+  // Equal on every measured field: only the lexical id can decide, and it does
+  // so in both array orders.
+  const twinA: BenchmarkEvidence = { ...cleaner, id: 'codex-a' }
+  const twinB: BenchmarkEvidence = { ...cleaner, id: 'codex-b' }
+  expect(pick([twinB, twinA])).toBe('codex-a')
+  expect(pick([twinA, twinB])).toBe('codex-a')
 })
 
 it('ignores admissible records for other routes when selecting evidence', () => {

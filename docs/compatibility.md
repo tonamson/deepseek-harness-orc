@@ -483,9 +483,13 @@ The gate ran with:
 | `@deepseek-ai/schemastery` | `3.18.4` |
 | Node.js / npm / pnpm | v24.19.0 / 12.0.2 / 11.7.0 |
 
-`tests/integration/compatibility.spec.ts` asserts every one of these exact
-versions and every DSH peer pin (`"0.1.6-alpha.2"`, no caret, tilde, range, or
-`||`).
+`tests/integration/compatibility.spec.ts` asserts the installed version of every
+`@deepseek-ai/dsh*` package in that table and every DSH peer pin
+(`"0.1.6-alpha.2"`, no caret, tilde, range, or `||`). The `cordis`,
+`schemastery`, Node, npm, and pnpm rows are the versions the gate was *run*
+with, recorded for reproducibility; the manifest pins them by range (or, for
+Node and pnpm, not at all — CI provisions the pnpm version from
+`.github/workflows/ci.yml`, which the same spec asserts).
 
 ### Extension contracts the gate pins
 
@@ -596,15 +600,16 @@ still runs from the pre-install baseline, before any boot.
 
 The bundle's unload disposes the ORC service (which aborts the run lifetime and
 settles an in-flight delegated child startup durably) and the ORC session
-projection in the same Cordis fiber unload. The settlement write is a microtask
-triggered by the abort, while the projection effect's disposer runs in the same
-unload batch, so a startup cancelled *by the unload itself* can lose the race to
-write `orc/fail`. `tests/integration/disabled.spec.ts` therefore pins the
-settlement at the point the ORC service is disposed — the first unload step the
-Host composition performs — and pins contribution removal, the absence of an
-orphan child, and unchanged DSH defaults across the full disable. A future Host
-change that settles active runs before the projection is disposed should move
-that assertion after the complete disable.
+projection in the same Cordis fiber unload, and Cordis invokes one fiber's
+effect disposers **concurrently** — the projection registration is gone before
+the abort-triggered settlement microtask runs. The settlement is therefore no
+longer allowed to depend on the projection: `OrcService` mirrors the phase of
+every commit it makes, so `block()` decides and commits `orc/fail` from that
+mirror once the projection is absent, and the service effect's disposer awaits
+the settlement so the unload completes only after the record is durable.
+`tests/integration/disabled.spec.ts` performs the complete disable and asserts
+the durable result afterwards; the mirror is load-bearing (removing it fails
+that test).
 
 ## Concerns handed to later tasks
 
@@ -624,19 +629,18 @@ These are recorded here as gate output. Task 1 does not change later tasks.
    `SettingsScope<T>` provides the reactive `getSnapshot`/`subscribe` plus
    `set`/`unset`/`mutate` write path Task 9 needs. No `configForms` port is
    required.
-3. **Task 8 Step 3a — RESOLVED with a corrected verdict; see
+3. **Task 8 Step 3a — RESOLVED in the final fix wave; see
    [Task 8 Step 3a](#task-8-step-3a-typert-wire-artifacts-and-the-manual-contribution-path).**
    The published generator is library-only and requires the DSH monorepo
    workspace shape, so it cannot emit the two wire artifacts for this external
    single-package repository (evidence in the Task 8 report). The manual
    `ctx.typert.register()` path *can* serve the Host face with no artifact at
    all (verified: the Gateway's SRC discovery claims and resolves the decorated
-   `orcRemoteHost` endpoints with zero registered definitions), and a client
-   `./remote` contribution is hand-producible. The remaining gap is the client
-   mount path: the clean Web profile's assembly mounts only its own explicit
-   build-time `/remote` imports and discovers nothing, so `ctx.remote.orc` is
-   unavailable there without a DSH-side assembly change or a self-mounting
-   client plugin. `./typert` and `./remote` stay undeclared.
+   `orcRemoteHost` endpoints with zero registered definitions). The client mount
+   path — the part the earlier verdict called unavailable — is the public
+   `ctx.remote.$mount(contribution)`, and `src/client/index.tsx` now uses it to
+   mount a hand-written contribution, so `ctx.remote.orc` **does** exist in a
+   clean Web profile. `./typert` and `./remote` stay undeclared.
 4. **Task 8 — `startContinuable` request shape.** `request.prompt` is
    `ContentBlock[]`, not a string, and `request.parent` is an `Agent` object
    (not an id); `signal` sits on the spec, not on the request.
@@ -679,14 +683,16 @@ These are recorded here as gate output. Task 1 does not change later tasks.
     fresh `CliAdapter` therefore has no green probe and `run` rejects until
     `probe` or `catalog` has succeeded; Task 8 must persist or re-derive that
     evidence if a probe is expected to survive a process restart.
-13. **Task 10 — disable-time settlement ordering.** The Host's fiber unload
-    disposes the ORC service and the ORC session projection in the same batch,
-    and the projection effect's disposer runs before the aborted child startup's
-    settlement microtask. An active delegated run is therefore cancelled on
-    disable (no orphan child, no completion), but the durable `orc/fail` write
-    for a startup cancelled *by that same unload* cannot land after the
-    projection is gone. See
-    [Lifecycle note: disable ordering](#lifecycle-note-disable-ordering). A
-    future Host change should settle active runs before disposing the
-    projection; Task 10 pins the settlement at the service-disposal step and
-    reports the gap rather than weakening the assertion.
+13. **Task 10 — disable-time settlement ordering: FIXED in the final fix wave.**
+    The Host's fiber unload disposes the ORC service and the ORC session
+    projection in the same batch, and Cordis invokes one fiber's effect
+    disposers concurrently — the ORC projection registration is in fact
+    disposed *before* the aborted child startup settles. The durable `orc/fail`
+    write for a startup cancelled by that unload is no longer lost:
+    `OrcService` mirrors the phase of every commit it makes, so `block()` can
+    still decide and commit the record once the projection is gone, and the
+    service effect's disposer awaits the settlement, so the unload completes
+    only after the record has landed. `tests/integration/disabled.spec.ts` now
+    performs the complete disable (no hand-called `dispose()`) and asserts the
+    durable result; removing the phase mirror fails that test. See
+    [Lifecycle note: disable ordering](#lifecycle-note-disable-ordering).

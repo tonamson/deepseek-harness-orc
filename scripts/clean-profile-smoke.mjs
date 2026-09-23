@@ -59,9 +59,17 @@ const WEB_BANNER = 'dsh web: '
 
 const DSH_BIN = join(ROOT, 'node_modules', '.bin', 'dsh')
 
+/**
+ * One refused smoke step.
+ *
+ * Thrown rather than exiting in place: `main` owns an owned temp directory whose
+ * `finally` must run on every failure, and `process.exit` would skip it and leak
+ * the profile. The top-level handler below reports the message and the exit code.
+ */
+class SmokeRefusal extends Error {}
+
 function fail(message) {
-  process.stderr.write(`clean-profile-smoke: ${message}\n`)
-  process.exit(1)
+  throw new SmokeRefusal(message)
 }
 
 function step(message) {
@@ -661,4 +669,10 @@ async function main() {
   }
 }
 
-await main()
+try {
+  await main()
+} catch (error) {
+  if (!(error instanceof SmokeRefusal)) throw error
+  process.stderr.write(`clean-profile-smoke: ${error.message}\n`)
+  process.exitCode = 1
+}

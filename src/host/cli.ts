@@ -673,7 +673,19 @@ export class CliAdapter {
         safeDiagnostic(String(error), executable),
       )
     }
-    await handle.waitForExit()
+    try {
+      // A provider failure can surface here rather than on `done`, so this is
+      // guarded like every neighbouring await: a failing probe must reject with
+      // an ORC-owned code, never with a raw transport error.
+      await handle.waitForExit()
+    } catch (error) {
+      handle.terminate()
+      throw new CliError(
+        'unsupported-protocol',
+        'the selected CLI failed while running',
+        safeDiagnostic(String(error), executable),
+      )
+    }
     if (signal.aborted) throw abortError(signal)
 
     const stdout = readCollected(handle.collected.stdout)

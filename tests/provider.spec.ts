@@ -15,18 +15,25 @@ it('refuses a green result from a previous revision', async () => {
   const green = await adapter.test(route, 'rev-1', new AbortController().signal)
   await expect(adapter.run(route, 'review', 'rev-2', green, new AbortController().signal)).rejects.toThrow(/stale/)
 })
+// The fourth column is how many dispatches the failure is allowed to reach: a
+// pre-flight refusal must never call the provider at all, while an in-band
+// failure is exactly one dispatch to the requested route. A blanket
+// `calls.every(...)` is vacuous on the rows that never dispatch.
 it.each([
-  ['unknown-model', 'model-unavailable'],
-  ['wrong-provider', 'route-mismatch'],
-  ['auth', 'authentication'],
-  ['network', 'network'],
-  ['quota', 'quota'],
-  ['empty', 'empty-result'],
-] as const)('%s fails closed', async (failure, code) => {
+  ['unknown-model', 'model-unavailable', 0],
+  ['wrong-provider', 'route-mismatch', 0],
+  ['auth', 'authentication', 1],
+  ['network', 'network', 1],
+  ['quota', 'quota', 1],
+  ['empty', 'empty-result', 1],
+] as const)('%s fails closed', async (failure, code, dispatches) => {
   const llm = fakeLlm({ failure })
   await expect(new ProviderAdapter(llm).test(route, 'rev-1', new AbortController().signal))
     .resolves.toMatchObject({ ok: false, code })
-  expect(llm.calls.every(call => call.provider === 'custom')).toBe(true)
+  expect(llm.calls).toHaveLength(dispatches)
+  // Every dispatch that did happen addressed the exact requested route.
+  expect(llm.calls.map(call => [call.provider, call.model, call.reasoningEffort]))
+    .toEqual(Array.from({ length: dispatches }, () => ['custom', 'm1', 'high']))
 })
 
 it('maps a degenerate empty response to empty-result', async () => {

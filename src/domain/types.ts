@@ -71,9 +71,23 @@ export interface CatalogEntry {
   /** Version of the installed backend the observation was taken against. */
   backendVersion: string
   model: string
-  /** Effort values the account and backend actually accept for this model. */
+  /**
+   * Effort values the adapter advertises for this model.
+   *
+   * Advertised capability, not a verified account entitlement: the live read
+   * carries no access signal, so an effort listed here is one the *adapter*
+   * accepts, and the only verified access evidence is a green connection test
+   * bound to this exact route and revision.
+   */
   efforts: string[]
-  /** Whether the configured account can use this exact route right now. */
+  /**
+   * Whether the configured account was observed to use this exact route.
+   *
+   * `false` means **unverified**, not known-denied (R23): a live DSH provider
+   * catalog read carries no account-access signal, so the fail-closed encoding
+   * of "no evidence" is to withhold the claim. A CLI catalog entry, whose own
+   * probe succeeded, is the one observation that can record `true`.
+   */
   accountAccess: boolean
   /** Official capability/pricing source the claim came from. */
   sourceUrl: string
