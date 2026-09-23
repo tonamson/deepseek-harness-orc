@@ -137,7 +137,23 @@ export interface Profile {
  *
  * @returns the archive, its file manifest, and the owned directory holding it.
  */
+/**
+ * Build the packed artifacts once per test process.
+ *
+ * `npm pack` publishes `lib/`, which is gitignored, so packing without building
+ * would either fail on a fresh clone or — worse — silently test a stale build.
+ * The profile specs must exercise the artifacts this source produces.
+ */
+let built = false
+function ensureBuilt(): void {
+  if (built) return
+  built = true
+  execFileSync(process.execPath, [join(REPO_ROOT, 'scripts', 'build.mjs')], { cwd: REPO_ROOT, stdio: 'inherit' })
+}
+
+/** Pack this repository into one owned temp directory and report the archive. */
 export function packBundle(): PackedBundle {
+  ensureBuilt()
   const root = mkdtempSync(join(tmpdir(), 'orc-profile-'))
   const destination = join(root, 'package')
   mkdirSync(destination, { recursive: true })

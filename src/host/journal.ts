@@ -395,6 +395,12 @@ export class SessionOrcJournal implements OrcJournal {
  * unloading the plugin removes the projection key with the rest of ORC's
  * contributions.
  *
+ * The projection is disposed as part of the plugin unload, and a child startup
+ * that unload cancels settles only afterwards, so a blocking write issued from
+ * that settlement cannot rely on this key still existing. The service keeps its
+ * own phase mirror for exactly that guard (see `OrcService.block`); the durable
+ * session is still writable, so the record itself always lands.
+ *
  * @param ctx - the calling plugin's context; it must carry `sessionProjections`
  *   and `sessions`, which the `orc-host` Loader row declares as injections.
  * @returns the Cordis effect disposer, with the live journal attached.

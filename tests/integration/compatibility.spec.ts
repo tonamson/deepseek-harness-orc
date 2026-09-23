@@ -76,6 +76,17 @@ describe('supported DSH version set', () => {
     expect(workflow).toContain('node scripts/clean-profile-smoke.mjs "${{ matrix.dsh-version }}"')
   })
 
+  it('provisions a pinned pnpm before the smoke step', () => {
+    // `dsh plugin` forwards to pnpm, so the release gate must not depend on
+    // whatever pnpm the runner image happens to provide.
+    const pnpm = /PNPM_VERSION:\s*"([^"]+)"/.exec(workflow)
+    expect(pnpm?.[1]).toMatch(/^\d+\.\d+\.\d+$/)
+    expect(workflow).toContain('uses: pnpm/action-setup@v4')
+    expect(workflow).toContain('version: ${{ env.PNPM_VERSION }}')
+    // Provisioning precedes the smoke step that needs it.
+    expect(workflow.indexOf('pnpm/action-setup')).toBeLessThan(workflow.indexOf('clean-profile-smoke.mjs'))
+  })
+
   it('records the narrowing and why in the compatibility contract', () => {
     expect(compatibility).toContain(SUPPORTED)
     expect(compatibility).toContain(UNSUPPORTED)

@@ -270,7 +270,10 @@ describe('durable ordering', () => {
       .map(event => event.data.decision)
       .filter(decision => decision.stage === 'review')
     expect(reviewDecisions).toHaveLength(0)
-    expect(ports.journal.events.at(-1)!.type).toBe('orc/fail')
+    // The refusal is a routing outcome, not a run failure (I8): the stage is
+    // blocked, the run's phase is untouched, and nothing is logged as failed.
+    expect(ports.journal.events.filter(event => event.type === 'orc/fail')).toHaveLength(0)
+    expect(recovered.state(ports.supervisor).phase).toBe('implement')
   })
 
   it('cannot raise a resumed run whose log records a low classification', async () => {
@@ -327,7 +330,10 @@ describe('durable ordering', () => {
       .map(event => event.data.decision)
       .filter(decision => decision.stage === 'review')
     expect(reviewDecisions).toHaveLength(0)
-    expect(ports.journal.events.at(-1)!.type).toBe('orc/fail')
+    // The refusal is a routing outcome, not a run failure (I8): it blocks the
+    // stage but leaves the run's phase alone.
+    expect(ports.journal.events.filter(event => event.type === 'orc/fail')).toHaveLength(0)
+    expect(recovered.state(ports.supervisor).phase).toBe('implement')
   })
 
   it('cannot raise a legacy run classified only by its committed route decision', async () => {
@@ -428,7 +434,7 @@ describe('route decisions', () => {
       .not.toBe(review.route.kind === 'cli' ? review.route.cli : '')
   })
 
-  it('reports an actionable no-qualifying-route failure for high-risk review without evidence', async () => {
+  it('reports an actionable no-qualifying-route refusal without failing the run', async () => {
     const manual = parseConfig({
       analysisMode: 'manual',
       allowed: [planRoute, codexRoute, claudeRoute],
@@ -437,12 +443,25 @@ describe('route decisions', () => {
     const ports = fakePorts({ config: manual })
     const svc = new OrcService(ports)
     await toReview(ports, svc)
+    const before = ports.journal.events.length
 
     await expect(svc.dispatch(ports.supervisor, 'review', 'review task-1', signal)).rejects.toThrow(/no-qualifying-route/)
-    const last = ports.journal.events.at(-1)!
-    expect(last.type).toBe('orc/fail')
-    expect(last.data).toMatchObject({ type: 'fail', reason: expect.stringMatching(/no-qualifying-route/) })
+
+    // I8: the refusal is not terminal. Nothing is logged as a failure, the run
+    // keeps its phase, and the stage can be dispatched again once the policy
+    // changes — which is exactly what a user who just fixed the settings does.
+    expect(ports.journal.events).toHaveLength(before)
+    expect(svc.state(ports.supervisor).phase).toBe('implement')
     await expect(svc.complete(ports.supervisor)).rejects.toThrow(/blocking/)
+
+    ports.config = parseConfig({
+      analysisMode: 'manual',
+      allowed: [planRoute, codexRoute, claudeRoute],
+      manual: { spec: planRoute, plan: planRoute, review: codexRoute, audit: claudeRoute },
+    })
+    ports.reports.push(cleanReport)
+    await expect(svc.dispatch(ports.supervisor, 'review', 'review task-1', signal)).resolves.toMatchObject({ phase: 'audit' })
+    expect(ports.journal.events.at(-1)!.type).toBe('orc/review-result')
   })
 
   it('routes the code stage through the configured provider without a lifecycle transition', async () => {

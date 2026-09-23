@@ -135,9 +135,15 @@ export function apply(ctx: Context, config: OrcConfig): void {
 
   ctx.effect(() => {
     const unprovide = ctx.provide('orc', service)
-    return () => {
+    return async () => {
       unprovide()
-      service.dispose()
+      // Awaiting the settlement makes the unload complete only once every
+      // in-flight run mutation has committed — including the blocking `orc/fail`
+      // write for a child startup this abort cancels. Cordis disposes a fiber's
+      // effects concurrently and the durable projection may already be gone, so
+      // the service's own phase mirror is what lets that write still be decided
+      // and committed (I6).
+      await service.dispose()
     }
   }, 'orc.service')
 

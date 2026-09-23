@@ -284,10 +284,26 @@ describe('plugin unload', () => {
     await svc.start(ports.supervisor, HIGH_RISK)
     await svc.dispatch(ports.supervisor, 'spec', 'spec input', signal)
     await svc.dispatch(ports.supervisor, 'plan', 'plan input', signal)
-    svc.dispose()
+    await svc.dispose()
     await expect(svc.createLead(ports.supervisor)).rejects.toThrow(/ORC was disabled/)
     expect(ports.journal.events.at(-1)!.type).toBe('orc/fail')
     expect(ports.subagents.starts.at(-1)!.childId).toBe(`${SUPERVISOR_ID}-orc-lead`)
+  })
+
+  it('settles an in-flight child startup before dispose resolves', async () => {
+    const ports = fakePorts()
+    const svc = new OrcService(ports)
+    await svc.start(ports.supervisor, HIGH_RISK)
+    await svc.dispatch(ports.supervisor, 'spec', 'spec input', signal)
+    await svc.dispatch(ports.supervisor, 'plan', 'plan input', signal)
+    const lead = await svc.createLead(ports.supervisor)
+    // A startup the abort will cancel: dispose must not resolve before its
+    // settlement has been committed, because the Host disposes the durable
+    // projection in the same unload batch.
+    const pending = svc.createPeer(lead, 'peer-1').catch((error: unknown) => error)
+    await svc.dispose()
+    expect(ports.journal.events.at(-1)!.type).toBe('orc/fail')
+    expect((await pending)).toBeInstanceOf(Error)
   })
 })
 

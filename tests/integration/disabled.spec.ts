@@ -151,17 +151,19 @@ describe('profile lifecycle', () => {
     const pending = service.createPeer(lead, 'peer-2')
 
     const before = snapshotProfile(profile)
-    // Disabling disposes the ORC service — the first unload step the Host
-    // composition performs — which cancels the in-flight delegation and settles
-    // the run while its durable projection is still mounted.
-    service.dispose()
+    // The complete disable, in its real order: the Host's unload aborts the
+    // in-flight child startup and settles the run while its durable projection
+    // is still mounted, and only then disposes the projection itself.
+    await manager.setBundleEnabled(PACKAGE_NAME, false)
     await expect(pending).rejects.toThrow(/ORC was disabled/)
     release()
+
+    // The settlement is durable in the session log, and it landed during the
+    // unload rather than being lost when the projection was disposed.
     expect(supervisor.session.snapshotEvents().at(-1)?.type).toBe('orc/fail')
+    expect(runtime.projection(supervisor.session)).toBeUndefined()
 
     // The rest of the disable removes every runtime contribution.
-    await manager.setBundleEnabled(PACKAGE_NAME, false)
-    // The cancelled startup materialized no child: the two real children remain.
     expect(runtime.subagents.children.size).toBe(2)
     expect(runtime.contributions()).toEqual({ service: false, tool: false, policy: false, page: false })
     expect(snapshotDefaults(profile)).toEqual(before.defaults)

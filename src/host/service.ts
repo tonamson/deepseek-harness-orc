@@ -26,6 +26,10 @@
  * - A dispatch is refused unless a green connection result bound to the exact
  *   route key and current connection revision exists; the service verifies the
  *   route itself when none is recorded (R23). There is no fallback route.
+ * - A route-selection refusal is not a run failure. It leaves the lifecycle
+ *   untouched and is thrown as an actionable error, so the user can change the
+ *   settings or generate the missing evidence and dispatch the same stage
+ *   again; every other routing failure blocks.
  * - Every route decision is logged, credential-free, before the run it
  *   authorizes, and the committed decisions are what recovery reads back.
  * - Any child startup, route, or dispatch failure appends the reducer's only
@@ -41,7 +45,7 @@ import { configRevision, routeKey } from '../domain/config.js'
 import type { BenchmarkSnapshot } from '../domain/evidence.js'
 import { parseReport } from '../domain/report.js'
 import type { RiskDecision } from '../domain/risk.js'
-import { selectRoute, type RouteDecision } from '../domain/routing.js'
+import { selectRoute, RouteError, type RouteDecision } from '../domain/routing.js'
 import type {
   CatalogEntry,
   CatalogSnapshot,
@@ -214,6 +218,17 @@ export class OrcService {
   private readonly sessions = new Map<string, Session>()
   /** Per-run mutation chain. */
   private readonly tails = new Map<string, Promise<unknown>>()
+  /**
+   * The last phase this process committed for one run.
+   *
+   * The durable projection is the authority on a run's phase, but it is disposed
+   * as part of the plugin unload — and a child startup that unload cancels
+   * settles only after the projection key is gone. {@link block} still has to
+   * decide whether the run can take its blocking event, so the service mirrors
+   * the phase of every commit it makes. The mirror guards the blocking write
+   * only; every other read goes to the journal.
+   */
+  private readonly phases = new Map<string, OrcState['phase']>()
   /** The last catalog observation, paired with the policy revision it was taken under. */
   private cachedCatalog: { snapshot: CatalogSnapshot; revision: string } | undefined
 
@@ -221,9 +236,19 @@ export class OrcService {
     this.ports = ports
   }
 
-  /** Stop accepting new child startups. Called when the ORC plugin unloads. */
-  dispose(): void {
+  /**
+   * Stop accepting new child startups and settle every in-flight run mutation.
+   *
+   * Called when the ORC plugin unloads. The returned promise resolves only once
+   * every mutation that was already running has settled, which is what makes the
+   * durable `orc/fail` write for a startup this abort cancels actually land: the
+   * Host's unload disposes the ORC projection in the same batch, and an async
+   * effect disposer that awaits this call keeps that projection mounted until
+   * the settlement is committed.
+   */
+  async dispose(): Promise<void> {
     this.lifetime.abort(new OrcServiceError('ORC was disabled'))
+    await Promise.all([...this.tails.values()])
   }
 
   // ---------------------------------------------------------------- lifecycle
@@ -264,6 +289,7 @@ export class OrcService {
         // `risk` field, or the run's first committed route decision.
         const classified = durable !== null || this.ports.journal.decisions(supervisor.session).length > 0
         if (!classified && !this.risks.has(runId) && risk.path === 'orc') this.risks.set(runId, risk)
+        this.phases.set(runId, state.phase)
         return state
       }
       if (risk.path !== 'orc') {
@@ -516,13 +542,13 @@ export class OrcService {
       const prior = stage === 'audit' ? this.lastReviewDecision(session) : undefined
       let decision: RouteDecision
       try {
-        // The catalog read is inside the blocking guard: a provider discovery
-        // failure is a routing failure, so it blocks the run with an ORC-owned
+        // The catalog read is inside the routing guard: a provider discovery
+        // failure is a task failure, so it blocks the run with an ORC-owned
         // reason and never puts a raw adapter error in model context.
         const catalog = await this.catalogFor(signal)
         decision = selectRoute(stage, risk, config, catalog, this.ports.benchmarks, this.now(), prior)
       } catch (error) {
-        await this.block(session, runId, `route selection for ${stage} failed: ${safeReason(error)}`)
+        await this.blockOnRoutingFailure(session, runId, stage, error)
         throw error
       }
       await this.ports.journal.commit(session, {
@@ -660,7 +686,7 @@ export class OrcService {
         const catalog = await this.catalogFor(signal)
         decision = selectRoute(stage, FINAL_GATE_RISK, config, catalog, this.ports.benchmarks, this.now(), prior)
       } catch (error) {
-        await this.block(session, runId, `route selection for the final ${stage} failed: ${safeReason(error)}`)
+        await this.blockOnRoutingFailure(session, runId, stage, error)
         throw error
       }
       await this.ports.journal.commit(session, {
@@ -867,18 +893,66 @@ export class OrcService {
   private async commit(session: Session, event: OrcEvent): Promise<OrcState> {
     const next = reduce(this.ports.journal.state(session), event)
     await this.ports.journal.commit(session, event)
+    this.phases.set(event.runId, next.phase)
     return next
   }
 
-  /** Append the reducer's blocking event for a failed stage, if the run can take it. */
+  /**
+   * Append the reducer's blocking event for a failed stage, if the run can take it.
+   *
+   * The guard reads the durable phase, falling back to the process mirror when
+   * the projection is already disposed: on unload, the abort this service issues
+   * settles an in-flight child startup only after the projection key is gone, and
+   * losing the blocking record there would misreport a cancelled run as clean.
+   * The session itself is still writable, so the record lands either way.
+   */
   private async block(session: Session, runId: string, reason: string): Promise<void> {
-    const state = this.ports.journal.state(session)
-    if (!state.started || state.phase === 'failed' || state.phase === 'completed') return
+    const phase = this.phaseOf(session, runId)
+    if (phase === undefined || phase === 'failed' || phase === 'completed') return
     await this.ports.journal.commit(session, {
       ...this.envelope(runId, 'service', SessionId(runId)),
       type: 'fail',
       reason,
     })
+  }
+
+  /** The run's committed phase, or the process mirror once the projection is gone. */
+  private phaseOf(session: Session, runId: string): OrcState['phase'] | undefined {
+    try {
+      const state = this.ports.journal.state(session)
+      if (state.started) return state.phase
+    } catch {
+      // The projection was disposed with the plugin; the mirror is the only
+      // remaining authority for a run this process committed.
+    }
+    return this.phases.get(runId)
+  }
+
+  /**
+   * Block the run for a routing failure — unless it is a route refusal.
+   *
+   * A {@link RouteError} is not a run failure: it is the policy telling the user
+   * that no eligible route exists for this stage, and the design's answer is
+   * "stop and ask the user to select or configure another route", not "fail the
+   * run". The reducer's only blocking event is terminal (`fail` is legal from a
+   * non-terminal phase, and nothing accepts `failed`), so a refusal leaves the
+   * lifecycle untouched: the run keeps its phase, nothing is logged as a
+   * failure, and the same stage can be dispatched again as soon as the user
+   * changes the settings or generates the missing evidence. Every attempt
+   * re-reads the live config, catalog, and evidence, so the retry sees the new
+   * policy without restarting the run.
+   *
+   * Every other routing failure — a provider discovery fault, an unreadable
+   * evidence record — is an infrastructure failure and blocks.
+   */
+  private async blockOnRoutingFailure(
+    session: Session,
+    runId: string,
+    stage: Stage,
+    error: unknown,
+  ): Promise<void> {
+    if (error instanceof RouteError) return
+    await this.block(session, runId, `route selection for ${stage} failed: ${safeReason(error)}`)
   }
 
   /**

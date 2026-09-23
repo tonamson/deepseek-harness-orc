@@ -6,11 +6,19 @@
 # bundle's settings design requires. The matrix therefore has one entry, and it
 # is never widened by semver inference. Adding a version means adding it here
 # only after the clean-profile smoke passes for it.
+#
+# pnpm is provisioned explicitly and pinned: `dsh plugin` forwards to pnpm, so
+# the clean-profile smoke needs it on PATH, and an unpinned runner-provided pnpm
+# would make the release gate depend on whatever the image happens to ship.
 name: ci
 
 on:
   push:
   pull_request:
+
+env:
+  # The pnpm release the smoke's `dsh plugin` path is verified against.
+  PNPM_VERSION: "11.7.0"
 
 jobs:
   gate:
@@ -21,6 +29,9 @@ jobs:
         dsh-version: ["0.1.6-alpha.2"]
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
       - uses: actions/setup-node@v4
         with:
           node-version: 24
