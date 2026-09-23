@@ -1,0 +1,49 @@
+{
+  "suiteRevision": "orc-review-v1",
+  "fixtures": [
+    {
+      "id": "fin-round-up",
+      "scope": "financial",
+      "sha256": "2327495607edad42d53a810ce49ae8ee0ebf951314917c074e598992f7249a81",
+      "expected": [
+        "rounding-overpays"
+      ]
+    },
+    {
+      "id": "fin-double-settle",
+      "scope": "financial",
+      "sha256": "c142b1f5889320752d170ca6c8e45d7aac8b862137b5775bf3693a4abf0f7a76",
+      "expected": [
+        "duplicate-credit"
+      ]
+    },
+    {
+      "id": "sec-auth-bypass",
+      "scope": "security",
+      "sha256": "0f806ecbd204e58003f9a8b4ac417e11a49737700a7207f9bfa1f58be3ade58b",
+      "expected": [
+        "authorization-bypass"
+      ]
+    },
+    {
+      "id": "sec-secret-log",
+      "scope": "security",
+      "sha256": "1a6a6b12df6e12aa4560b4af99684c82d382e35a63bf2fb5236025f197b67b1a",
+      "expected": [
+        "secret-in-log"
+      ]
+    },
+    {
+      "id": "clean-round",
+      "scope": "financial",
+      "sha256": "014e7f81d7f59136a75f6bf6ad53a0ceeb80d38c9e37a804ea942b330c36dc55",
+      "expected": []
+    },
+    {
+      "id": "clean-auth",
+      "scope": "security",
+      "sha256": "2692c0ac7c54b4debcb3dae2af8df02630d8e8178141288822710af15c1dabbe",
+      "expected": []
+    }
+  ]
+}
