@@ -132,11 +132,21 @@ export interface CliProbe {
 }
 
 /**
- * A full product-prefixed semantic version with an optional documented
- * prerelease. Nothing else is accepted: a leading `v`, trailing text, ANSI
- * noise, and non-numeric components are all malformed output.
+ * The plan-pinned shape: a full product-prefixed semantic version with an
+ * optional documented prerelease. `codex --version` prints exactly this, and
+ * the plan pins `claude <semver>` as the accepted Claude form too. A leading
+ * `v`, trailing text, ANSI noise, and non-numeric components are all malformed.
  */
 const VERSION_PATTERN = /^(codex|claude) (\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z][0-9A-Za-z.-]*))?$/
+
+/**
+ * The real-world Claude Code shape: a bare semantic version, optionally
+ * followed by the exact product suffix ` (Claude Code)` — real
+ * `claude --version` prints `2.1.280 (Claude Code)` with no product prefix.
+ * The suffix is a literal, never a loose pattern, so arbitrary trailing text
+ * stays malformed.
+ */
+const CLAUDE_BARE_VERSION_PATTERN = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z][0-9A-Za-z.-]*))?(?: \(Claude Code\))?$/
 
 /** SGR/CSI escape sequences. Stripped for diagnostics only, never for parsing. */
 const ANSI_PATTERN = /\u001b\[[0-9;?]*[A-Za-z]/g
@@ -190,26 +200,51 @@ function atOrAbove(parts: readonly number[], floor: readonly number[], prereleas
   return prerelease === ''
 }
 
+/** The numeric components and optional prerelease of one accepted version line. */
+type VersionComponents = readonly [major: string, minor: string, patch: string, prerelease: string]
+
+/**
+ * Match the accepted `--version` shapes for the selected CLI.
+ *
+ * `codex` accepts only the plan-pinned `codex <semver>` form. `claude` accepts
+ * that form and the real-world bare `<semver>` optionally followed by the exact
+ * ` (Claude Code)` suffix (R21). The suffix is a literal, never a loose
+ * pattern, so arbitrary trailing text stays malformed.
+ */
+function matchVersion(text: string, cli: CliName): VersionComponents | null {
+  const prefixed = VERSION_PATTERN.exec(text)
+  if (prefixed !== null && prefixed[1] === cli) {
+    return [prefixed[2], prefixed[3], prefixed[4], prefixed[5] ?? '']
+  }
+  if (cli === 'claude') {
+    const bare = CLAUDE_BARE_VERSION_PATTERN.exec(text)
+    if (bare !== null) return [bare[1], bare[2], bare[3], bare[4] ?? '']
+  }
+  return null
+}
+
 /**
  * Parse one `--version` line for the selected CLI.
  *
- * Only a full product-prefixed semantic version is accepted, and the product
- * must be the selected CLI. The verdict compares numeric components, so a
- * lexicographically larger `0.99.0` is still below `0.156.1`.
+ * The product must be the selected CLI. `codex` accepts only the plan-pinned
+ * `codex <semver>` form; `claude` accepts that form and the real-world bare
+ * `<semver>` optionally followed by the exact ` (Claude Code)` suffix. The
+ * verdict compares numeric components, so a lexicographically larger `0.99.0`
+ * is still below `0.156.1`.
  *
  * @throws {CliError} `invalid-version` when the output is malformed.
  */
 export function parseCliVersion(raw: string, cli: CliName): ParsedCliVersion {
   const text = raw.trim()
-  const match = VERSION_PATTERN.exec(text)
-  if (match === null || match[1] !== cli) {
+  const components = matchVersion(text, cli)
+  if (components === null) {
     throw new CliError(
       'invalid-version',
       `unrecognized ${cli} version output`,
       safeDiagnostic(text),
     )
   }
-  const [, , major, minor, patch, prerelease = ''] = match
+  const [major, minor, patch, prerelease] = components
   const parts = [Number(major), Number(minor), Number(patch)]
   const floor = MINIMUM_VERSIONS[cli].split('.').map(Number)
   return {

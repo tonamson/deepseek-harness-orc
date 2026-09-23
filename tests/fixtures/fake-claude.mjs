@@ -5,7 +5,9 @@
  * It speaks the three documented Claude Code interfaces the adapter probes,
  * with the exact output shapes the real CLI uses:
  *
- * - `claude --version`        → `<product> <semver>` on stdout.
+ * - `claude --version`        → the real shape, a bare `<semver>` with the
+ *                               exact ` (Claude Code)` product suffix (for
+ *                               example `2.1.280 (Claude Code)`), on stdout.
  * - `claude auth status`      → authentication status as JSON on stdout, exit
  *                               0 when logged in and 1 when not
  *                               (https://code.claude.com/docs/en/cli-reference).
@@ -26,14 +28,14 @@
 const args = process.argv.slice(2)
 const mode = process.env.ORC_FAKE_MODE ?? 'ok'
 
-/** Version strings per mode, in the shape `claude --version` prints. */
+/** Version strings per mode, in the exact shape real `claude --version` prints. */
 const VERSIONS = {
-  ok: 'claude 2.1.280',
-  newer: 'claude 2.1.300',
-  'below-floor': 'claude 2.1.279',
+  ok: '2.1.280 (Claude Code)',
+  newer: '2.1.300 (Claude Code)',
+  'below-floor': '2.1.279 (Claude Code)',
   'bad-version': 'v2.1.280 garbage',
   'ansi-version': '\u001b[31munknown\u001b[0m',
-  'numeric-version': 'claude 1000.bad.1',
+  'numeric-version': '1000.bad.1 (Claude Code)',
 }
 
 const write = (text) => process.stdout.write(`${text}\n`)
@@ -41,7 +43,7 @@ const warn = (text) => process.stderr.write(`${text}\n`)
 const emit = (payload) => write(JSON.stringify(payload))
 const finish = (code) => process.exit(code)
 
-/** The version this run reports, in the real product-prefixed shape. */
+/** The version this run reports, in the real bare ` (Claude Code)` shape. */
 const version = () => process.env.ORC_FAKE_VERSION ?? VERSIONS[mode] ?? VERSIONS.ok
 
 /** Value of a `--flag value` pair, when present. */

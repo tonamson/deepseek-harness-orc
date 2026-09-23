@@ -74,6 +74,48 @@ it('rejects output that is not the selected product version', () => {
   expect(() => parseCliVersion('', 'codex')).toThrow(/version/)
 })
 
+/* R21: real `claude --version` prints a bare `<semver> (Claude Code)`. */
+
+it.each([
+  ['2.1.280', true],
+  ['2.1.300', true],
+  ['2.1.280 (Claude Code)', true],
+  ['2.1.300 (Claude Code)', true],
+  ['2.1.279', false],
+  ['2.1.279 (Claude Code)', false],
+  ['2.1.300-rc.1 (Claude Code)', true],
+  ['2.1.280-beta.2 (Claude Code)', false],
+] as const)('accepts the real Claude Code version shape %s', (raw, supported) => {
+  expect(parseCliVersion(raw, 'claude').supported).toBe(supported)
+})
+
+it('still accepts the plan-pinned product-prefixed Claude form', () => {
+  expect(parseCliVersion('claude 2.1.280', 'claude')).toMatchObject({
+    version: '2.1.280',
+    prerelease: '',
+    supported: true,
+  })
+  expect(parseCliVersion('claude 2.1.279', 'claude').supported).toBe(false)
+})
+
+it.each([
+  '2.1.280 (Claude Code) extra',
+  '2.1.280 (claude code)',
+  '2.1.280 (Claude Code',
+  '2.1.280(Claude Code)',
+  '2.1.280 claude code',
+  'v2.1.280 (Claude Code)',
+] as const)('rejects a near-miss Claude product suffix %s', raw => {
+  expect(() => parseCliVersion(raw, 'claude')).toThrow(/version/)
+})
+
+it('leaves the Codex contract product-prefixed and suffix-free', () => {
+  expect(parseCliVersion('codex 0.157.0', 'codex').supported).toBe(true)
+  expect(() => parseCliVersion('0.157.0', 'codex')).toThrow(/version/)
+  expect(() => parseCliVersion('0.157.0 (Claude Code)', 'codex')).toThrow(/version/)
+  expect(() => parseCliVersion('0.157.0 (Codex)', 'codex')).toThrow(/version/)
+})
+
 it('strips ANSI from the diagnostic and reports invalid-version', () => {
   const failure: unknown = (() => {
     try {
