@@ -261,6 +261,142 @@ version table and is now resolved by ruling:
    stderr with a stdout fallback, and the pinned `stderr: { maxBytes: 16_384 }`
    collect limit is sufficient for the one-line verdict.
 
+## Task 8 Step 3a: Typert wire artifacts and the manual contribution path
+
+Status: **the published generator cannot build the two artifacts for this
+external package** — the attempts, their exact output, and the conclusion are
+recorded in `.superpowers/sdd/2026-09-23-orc-plugin/task-8-report.md`. This
+section records the *other* published path the Task 8 report never addressed:
+the manual `ctx.typert.register()` route the loader's own module documentation
+names, and exactly how far it reaches.
+
+> Manual `ctx.typert.register()` remains available for contributions that do
+> not use a `./typert` artifact (hand-written wire schemas, tests, non-loader
+> compositions).
+> — `node_modules/@deepseek-ai/dsh-typert-loader/lib/index.js:27-29`
+
+The loader only *discovers and registers*: it resolves each mounted Loader
+entry's package.json, imports its `./typert` export, validates it
+(`lib/index.js:77-118`), and calls `ctx.typert.register(manifest)`
+(`lib/index.js:299`). Nothing about the registry requires the generator, and
+the registry README states the general rule: "Generated artifacts register
+through the loader in Loader compositions; **any other owner calls
+`ctx.typert.register(contribution)` directly** and receives the exact disposer
+that withdraws it" (`node_modules/@deepseek-ai/dsh-typert-registry/README.md:44`).
+The loader README says the same for packages "not loaded by the Loader at all":
+they need "an explicit `packages` entry or direct `ctx.typert.register()`
+ownership" (`node_modules/@deepseek-ai/dsh-typert-loader/README.md:115`).
+
+### (a) The Host face is servable without any generated artifact — verified
+
+`TypertContribution` is a plain data object — `{ package, face, schemas,
+model, invocations }` (`node_modules/@deepseek-ai/dsh-typert-registry/lib/types/types.d.ts:70-77`)
+— and `register(contribution)` is a public method on the published registry
+service (`.../lib/types/service.d.ts:59`). Nothing in the type is
+generator-produced.
+
+Verified against the installed `0.1.6-alpha.2` packages with a throwaway probe
+(not committed) that loaded `@deepseek-ai/cordis`, the published
+`@deepseek-ai/dsh-typert-registry`, the published `@deepseek-ai/dsh-api-gateway`
+host, and this package's built `lib/host/remote-host.js`:
+
+```
+$ node ./.typert-probe.mjs
+[a1] strict definitions registered: 0
+[a1] orc/getCatalog claimed: true
+[a1] descriptor: {"id":"src:orcRemoteHost#orc/getCatalog","cancellation":{"parameter":"signal"},"result":{"mode":"src-json"}}
+[a1] receiver is ctx.get(orcRemoteHost): false | arg count: 1
+[a2] package record: @tonamson/dsh-orc#host
+[a2] strict endpoint: @tonamson/dsh-orc#orcRemoteHost.getCatalog
+[a2] schema keys: ["@tonamson/dsh-orc#CatalogSnapshot"]
+[a2] gateway now resolves: @tonamson/dsh-orc#orcRemoteHost.getCatalog
+[a2] after dispose -> endpoint: undefined | package: undefined
+```
+
+Two independent results, both stronger than the report's BLOCKED verdict:
+
+1. **SRC discovery (no contribution at all).** With **zero** registered strict
+   definitions, the Gateway host claims all three decorated endpoints
+   (`claimsEndpoint`, `dsh-api-gateway/lib/index.js:510-516`, via
+   `collectSrcClaims` `:518-530`) and `prepareInvocation` resolves
+   `orc/getCatalog` to a source-mode descriptor
+   (`src:orcRemoteHost#orc/getCatalog`, `result: { mode: 'src-json' }`,
+   `cancellation: { parameter: 'signal' }`) through `resolveDescriptor`'s
+   fallback (`:758-763`) and `resolveSrcDescriptor` (`:764-782`). The
+   `@Remote` markers and the `typertRemote` binding that `OrcRemoteHost`
+   already carries are the entire host-side requirement; the strict branch is
+   only taken when a definition is registered, and SRC is refused only for an
+   endpoint whose strict definition was *withdrawn* after being seen
+   (`:761`). The probe's `receiver is ctx.get(...)` line compares a service
+   proxy against the raw instance and is not a finding; `prepareInvocation`
+   succeeded, which includes `validateBinding`.
+2. **A hand-written strict contribution is accepted.** Registering a
+   hand-authored `TypertContribution` (one schema factory, one `orcRemoteHost`
+   service model, one `orc/getCatalog` invocation with strict codecs) through
+   `ctx.typert.register()` produced package record `@tonamson/dsh-orc#host`,
+   schema key `@tonamson/dsh-orc#CatalogSnapshot`, and strict endpoint
+   `@tonamson/dsh-orc#orcRemoteHost.getCatalog`; the Gateway then resolves the
+   strict descriptor in preference to SRC (`:758-759`), and the returned
+   disposer withdraws all three atomically.
+
+So **(a) is yes**: `ctx.typert.register()` can serve this package's Host face
+with no generated `./typert` artifact, and the Host face does not even need it.
+
+### (b) A client `./remote` contribution is hand-producible, but the clean Web profile will not mount it
+
+The client artifact is likewise plain data: `TypertRemoteContribution` is
+`{ package, descriptors }` (`dsh-typert-protocol/lib/types/types.d.ts:225-230`),
+and a real generated example (`node_modules/@deepseek-ai/dsh-goal/lib/typert.remote-client.js`)
+is a literal object of descriptors whose keys the probe read back as
+`["id","service","namespace","method","invocation","scope","parameters","result","sourceLocation"]`
+with `mode: 'strict'` codecs. The client Gateway validates a contribution
+**structurally, never by provenance**: `validateContribution`
+(`dsh-api-gateway/lib/types/client/index.js:136-176`) rejects duplicate or
+conflicting endpoints and requires strict input codecs
+(`requireStrictInputs`/`requireStrictCodec`, `:499-512`); it does not consult
+the generator, a package name allowlist, or any generated manifest.
+`$mount(contribution)` itself is public and generic (`:80-88`), and
+`assertMethodAvailable` only guards name collisions on the namespace service
+(`:353-368`). A hand-written `./remote` artifact is therefore *producible* and
+*mountable* by any client plugin that holds `ctx.remote`.
+
+What does **not** exist is discovery. The DSH Web client assembly value-imports
+a fixed, explicit list of `/remote` artifacts and mounts exactly that list
+(`node_modules/@deepseek-ai/dsh-api-remotes/lib/types/client/index.js:1-45`);
+its README states the rule outright:
+
+> The capability set is fixed by explicit build-time value imports; the Client
+> does not discover the Host's active Services or Remote definitions at
+> runtime.
+> Additional capabilities require an explicit `/remote` value import and mount
+> in this assembly.
+> — `node_modules/@deepseek-ai/dsh-api-remotes/README.md:73-74`
+
+This package cannot add itself to that list: the assembly is DSH-owned code,
+and there is no client-side counterpart of the host `typert-loader` that scans
+Loader entries for `./remote` exports (the loader is host-only —
+`inject: ['typert', 'loader']`, `require.resolve` against `ctx.baseUrl`).
+Consequently a clean Web profile does **not** expose `ctx.remote.orc`, which is
+exactly what Step 3a's stated proof requires.
+
+### Corrected verdict for Step 3a
+
+- The report's **generator** finding stands: no published generator entry point
+  builds the two artifacts for an external single-package repository.
+- The report's **BLOCKED** framing was incomplete. The Host face needs no
+  artifact at all (SRC discovery) and can additionally be served by a
+  hand-written `ctx.typert.register()` contribution; a client `./remote`
+  contribution can be hand-authored and is validated structurally.
+- What is genuinely unavailable is the **client mount path in a clean Web
+  profile**: `ctx.remote.orc` appears only if DSH adds this package to
+  `@deepseek-ai/dsh-api-remotes`, or if this bundle's own client plugin mounts
+  its own hand-written contribution through the public `ctx.remote.$mount()`
+  (API-permitted, but a composition decision the controller must make, and not
+  the proof Step 3a describes).
+- `./typert` and `./remote` therefore stay **undeclared** in `package.json`:
+  the loader imports a declared `./typert` export and fails loud on a broken
+  artifact, and this bundle has none to declare.
+
 ## Concerns handed to later tasks
 
 These are recorded here as gate output. Task 1 does not change later tasks.
@@ -279,16 +415,19 @@ These are recorded here as gate output. Task 1 does not change later tasks.
    `SettingsScope<T>` provides the reactive `getSnapshot`/`subscribe` plus
    `set`/`unset`/`mutate` write path Task 9 needs. No `configForms` port is
    required.
-3. **Task 8 Step 3a — the Typert generator is published but library-only.**
-   `@deepseek-ai/dsh-typert-generator@0.1.6-alpha.2` has no CLI (`bin` absent);
-   it is consumed as a programmatic API or a tsdown plugin, and it binds to a
-   workspace root with host/client **face aggregate tsconfigs**
-   (`WorkspaceAnalyzerOptions.hostConfig`/`clientConfig`). Whether it can emit
-   the two wire artifacts for a single external package with no aggregate
-   configs is unproven by this gate. It also requires `typescript ^6.0.3`,
-   while this manifest pins `typescript ^5.9.0`. Its `@deepseek-ai/cordis`
-   peer is `^4.0.2`, which the pinned `4.0.4` satisfies. This is the gate Task 8
-   Step 3a is meant to resolve; it is not resolved by Task 1.
+3. **Task 8 Step 3a — RESOLVED with a corrected verdict; see
+   [Task 8 Step 3a](#task-8-step-3a-typert-wire-artifacts-and-the-manual-contribution-path).**
+   The published generator is library-only and requires the DSH monorepo
+   workspace shape, so it cannot emit the two wire artifacts for this external
+   single-package repository (evidence in the Task 8 report). The manual
+   `ctx.typert.register()` path *can* serve the Host face with no artifact at
+   all (verified: the Gateway's SRC discovery claims and resolves the decorated
+   `orcRemoteHost` endpoints with zero registered definitions), and a client
+   `./remote` contribution is hand-producible. The remaining gap is the client
+   mount path: the clean Web profile's assembly mounts only its own explicit
+   build-time `/remote` imports and discovers nothing, so `ctx.remote.orc` is
+   unavailable there without a DSH-side assembly change or a self-mounting
+   client plugin. `./typert` and `./remote` stay undeclared.
 4. **Task 8 — `startContinuable` request shape.** `request.prompt` is
    `ContentBlock[]`, not a string, and `request.parent` is an `Agent` object
    (not an id); `signal` sits on the spec, not on the request.

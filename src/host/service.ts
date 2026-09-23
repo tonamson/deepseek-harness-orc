@@ -53,7 +53,7 @@ import type {
 } from '../domain/types.js'
 import { WorkflowError, reduce, type Actor, type OrcEvent, type OrcState } from '../domain/workflow.js'
 import { CliError, type CliProbe } from './cli.js'
-import { ORC_ROUTE_EVENT, type OrcJournal } from './journal.js'
+import { ORC_ROUTE_EVENT, type OrcJournal, type OrcStartRecord } from './journal.js'
 import type { ConnectionResult } from './provider.js'
 import type { OrcSettingsBridge } from './settings.js'
 
@@ -222,7 +222,14 @@ export class OrcService {
    *
    * Idempotent: a run that already started returns its state unchanged, so a
    * retried activation gate cannot fail the session or replace the run's
-   * original risk classification.
+   * original risk classification. The classification is committed with the
+   * start record, so a resumed service routes a run whose log holds nothing but
+   * its start.
+   *
+   * A run whose log predates that record has no durable classification: the
+   * replayed gate is then the only surviving one, so it heals the run instead
+   * of leaving every later dispatch with nothing to route on. A classification
+   * that does not call for ORC never installs one.
    *
    * @throws when the classification does not call for ORC at all.
    */
@@ -231,14 +238,21 @@ export class OrcService {
     this.bindSession(runId, supervisor.session)
     return await this.serialize(runId, async () => {
       const state = this.ports.journal.state(supervisor.session)
-      if (state.started) return state
+      if (state.started) {
+        if (!this.risks.has(runId) && risk.path === 'orc') this.risks.set(runId, risk)
+        return state
+      }
       if (risk.path !== 'orc') {
         throw new OrcServiceError(`a "${risk.path}" classification does not start an ORC run`)
       }
-      const next = await this.commit(supervisor.session, {
+      // The classification is committed *with* the start record, so a recovered
+      // service can route a run whose log holds nothing else.
+      const start: OrcStartRecord = {
         ...this.envelope(runId, 'supervisor', supervisor.id),
         type: 'start',
-      })
+        risk,
+      }
+      const next = await this.commit(supervisor.session, start)
       this.risks.set(runId, risk)
       return next
     })
@@ -623,13 +637,29 @@ export class OrcService {
     return runId
   }
 
-  /** The activation risk for one run: process-local first, then the durable decisions. */
+  /**
+   * The activation risk for one run: process-local first, then the durable
+   * records.
+   *
+   * The start record carries the classification this build commits, so a
+   * recovered service routes a start-only log. The first committed route
+   * decision is the legacy fallback for a log written before that field
+   * existed; only a log with neither leaves a run that cannot be routed.
+   */
   private riskOf(runId: string, session: Session): RiskDecision {
     const known = this.risks.get(runId)
     if (known !== undefined) return known
+    const recorded = this.ports.journal.risk(session)
+    if (recorded !== null) {
+      this.risks.set(runId, recorded)
+      return recorded
+    }
     const first = this.ports.journal.decisions(session)[0]
-    if (first !== undefined) return first.risk
-    throw new OrcServiceError(`no risk classification is recorded for ORC run ${runId}; restart the run`)
+    if (first !== undefined) {
+      this.risks.set(runId, first.risk)
+      return first.risk
+    }
+    throw new OrcServiceError(`no risk classification is recorded for ORC run ${runId}; replay the activation gate for this session`)
   }
 
   /** The committed review decision an audit must stay independent from. */

@@ -198,6 +198,50 @@ describe('real DSH session durability', () => {
     expect(recovered.state(resumedSupervisor).phase).toBe('plan')
   })
 
+  it('dispatches a resumed session whose log holds only the start record', async () => {
+    const ports = fakePorts()
+    const services = fakeDshSessionServices()
+    const install = installOrcJournal(services.ctx)
+    const session = services.store.create(SessionId(SUPERVISOR_ID))
+    const supervisor = fakeAgent({
+      id: SUPERVISOR_ID,
+      role: 'supervisor',
+      session,
+      agents: ports.agents,
+      options: { provider: 'deepseek', model: 'deepseek-v4.1-flash' },
+    })
+    ports.agents.live.set(SUPERVISOR_ID, supervisor)
+
+    const svc = new OrcService({ ...ports, journal: install.journal })
+    await svc.start(supervisor, HIGH_RISK)
+    // The only committed record is the start, so no route decision can carry
+    // the classification the resumed service must route with.
+    expect(session.snapshotEvents().map(event => event.type)).toEqual(['orc/start'])
+
+    // A restarted process: a fresh journal and service over the resumed log.
+    const resumedServices = fakeDshSessionServices()
+    const resumedInstall = installOrcJournal(resumedServices.ctx)
+    const resumed = resumedServices.store.create(SessionId(SUPERVISOR_ID), { seed: session.snapshotEvents() })
+    const resumedSupervisor = fakeAgent({
+      id: SUPERVISOR_ID,
+      role: 'supervisor',
+      session: resumed,
+      agents: ports.agents,
+      options: { provider: 'deepseek', model: 'deepseek-v4.1-flash' },
+    })
+    ports.agents.live.set(SUPERVISOR_ID, resumedSupervisor)
+    const recovered = new OrcService({ ...ports, journal: resumedInstall.journal })
+
+    await expect(recovered.dispatch(resumedSupervisor, 'spec', 'spec input', signal))
+      .resolves.toMatchObject({ phase: 'plan' })
+    expect(resumed.snapshotEvents().map(event => event.type).filter(type => type.startsWith('orc/'))).toEqual([
+      'orc/start',
+      'orc/route',
+      'orc/spec-request',
+      'orc/spec-result',
+    ])
+  })
+
   it('records the DSH 0.1.6 persistence contract for unknown plugin event types', () => {
     const session = Session.create(SessionId('orc-durability-probe'))
     session.append('orc/start', {

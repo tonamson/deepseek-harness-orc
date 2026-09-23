@@ -6,6 +6,9 @@
  *
  * - {@link OrcEvent} reducer events, logged as `orc/<event type>` and folded by
  *   the pure reducer. They carry the lifecycle the service is the sole caller of.
+ * - {@link OrcStartRecord}, the `orc/start` event carrying the run's activation
+ *   risk. It is the durable classification a recovered service routes with, so a
+ *   run whose only committed record is its start still dispatches.
  * - {@link OrcRouteRecord} decisions, logged as `orc/route` before the dispatch
  *   they authorize. They record provider/CLI, model, effort, stage, risk,
  *   catalog and benchmark identities, and the selection reason — never a
@@ -33,6 +36,7 @@ import type {
 import type {} from '@deepseek-ai/dsh-session-projection'
 import type { SessionProjectionStateMap } from '@deepseek-ai/dsh-session-projection/types'
 import { z, type ZodType } from 'zod'
+import type { RiskDecision } from '../domain/risk.js'
 import type { RouteDecision } from '../domain/routing.js'
 import { initialState, reduce, type OrcEvent, type OrcState } from '../domain/workflow.js'
 
@@ -58,8 +62,33 @@ export interface OrcRouteRecord {
   decision: RouteDecision
 }
 
+/**
+ * The durable start record.
+ *
+ * The reducer's `start` event plus the activation classification that opened the
+ * run. The risk is part of the record rather than process memory because it is
+ * the routing input for every later dispatch: a resumed service whose only
+ * committed record is this one must still be able to route, and the replayed
+ * activation gate must not be able to replace the classification the run
+ * started under.
+ *
+ * A log written before this field existed carries a plain `start` event and is
+ * still a valid {@link OrcRecord}; the service heals such a run from its
+ * replayed gate or its first committed route decision. That legacy shape is why
+ * the field is optional here: the union must still describe a log this build
+ * did not write.
+ */
+export interface OrcStartRecord extends Extract<OrcEvent, { type: 'start' }> {
+  /** The classification the run opened under; absent only in a legacy log. */
+  risk?: RiskDecision
+}
+
 /** Every durable ORC record. */
-export type OrcRecord = OrcEvent | OrcRouteRecord
+export type OrcRecord = OrcEvent | OrcStartRecord | OrcRouteRecord
+
+/** Whether one committed record is a start record carrying the classification. */
+export const hasStartRisk = (record: OrcRecord): record is OrcStartRecord & { risk: RiskDecision } =>
+  record.type === 'start' && 'risk' in record && record.risk !== undefined
 
 /** The `orc/*` session event names one durable record can be logged under. */
 export type OrcEventName = `orc/${OrcEvent['type']}` | 'orc/route'
@@ -78,7 +107,7 @@ export interface OrcJournalRecord {
 
 declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
-    'orc/start': Extract<OrcEvent, { type: 'start' }>
+    'orc/start': OrcStartRecord
     'orc/spec-request': Extract<OrcEvent, { type: 'spec-request' }>
     'orc/plan-request': Extract<OrcEvent, { type: 'plan-request' }>
     'orc/review-request': Extract<OrcEvent, { type: 'review-request' }>
@@ -109,11 +138,20 @@ export interface OrcProjectionState {
   /** Run state folded from the committed reducer events. */
   run: OrcState
   /**
+   * The activation risk recorded with the run's `orc/start` record, or `null`.
+   *
+   * It is the durable half of the classification: a recovered service routes
+   * with it before any route decision exists, so a start-only log is still a
+   * run a dispatch can be served from.
+   */
+  risk: RiskDecision | null
+  /**
    * Committed route decisions, in commit order.
    *
    * They are carried here because a recovered service must re-derive facts the
-   * reducer's own state has no field for: the run's activation risk (the first
-   * decision) and the review backend an audit must stay independent from.
+   * reducer's own state has no field for: the review backend an audit must stay
+   * independent from, and (for a log written before the start record carried
+   * the classification) the run's activation risk.
    */
   decisions: RouteDecision[]
 }
@@ -142,6 +180,13 @@ const PHASES = [
 ] as const
 
 const ROUTE_KINDS = ['provider', 'cli'] as const
+
+/** The classification that opened a run; the durable routing input. */
+const RiskSchema = z.object({
+  path: z.enum(['direct', 'orc']),
+  risk: z.enum(['low', 'high']),
+  reasons: z.array(z.string()),
+})
 
 /** One route reference inside a persisted decision. */
 const RouteSchema = z.union([
@@ -198,14 +243,11 @@ const ProjectionSchema = z.object({
     finalReview: z.enum(['none', 'clean', 'blocked']),
     finalAudit: z.enum(['none', 'clean', 'blocked']),
   }),
+  risk: z.union([RiskSchema, z.null()]),
   decisions: z.array(z.object({
     route: RouteSchema,
     stage: z.enum(['code', 'spec', 'plan', 'review', 'audit']),
-    risk: z.object({
-      path: z.enum(['direct', 'orc']),
-      risk: z.enum(['low', 'high']),
-      reasons: z.array(z.string()),
-    }),
+    risk: RiskSchema,
     catalogId: z.string(),
     benchmarkId: z.union([z.string(), z.null()]),
     reason: z.string(),
@@ -233,7 +275,11 @@ function applyRecord(state: OrcProjectionState, event: SessionEvent): OrcProject
   if (record.type === ORC_ROUTE_EVENT) {
     return { ...state, decisions: [...state.decisions, record.decision] }
   }
-  return { ...state, run: reduce(state.run, record) }
+  const run = reduce(state.run, record)
+  // A start record written before the classification became durable carries no
+  // risk; the state keeps the last one it saw instead of clearing it.
+  if (hasStartRisk(record)) return { ...state, run, risk: record.risk }
+  return { ...state, run }
 }
 
 /** A refused journal operation. */
@@ -248,6 +294,14 @@ export class OrcJournalError extends Error {
 export interface OrcJournal {
   /** Fold one session's committed ORC records into its run state. */
   state(session: Session): OrcState
+  /**
+   * The activation risk recorded with the run's start record, or `null`.
+   *
+   * `null` means the log predates the durable classification (or the run has
+   * not started); the service then falls back to its replayed gate and to the
+   * first committed route decision.
+   */
+  risk(session: Session): RiskDecision | null
   /** The committed route decisions for one session's run, in commit order. */
   decisions(session: Session): readonly RouteDecision[]
   /**
@@ -312,6 +366,10 @@ export class SessionOrcJournal implements OrcJournal {
     return this.projection(session).run
   }
 
+  risk(session: Session): RiskDecision | null {
+    return this.projection(session).risk
+  }
+
   decisions(session: Session): readonly RouteDecision[] {
     return this.projection(session).decisions
   }
@@ -354,9 +412,9 @@ export function installOrcJournal(ctx: Context): OrcJournalInstall {
     return projections.register({
       key: 'orc',
       stateSchema: ProjectionSchema,
-      init: () => ({ run: initialState(), decisions: [] }),
+      init: () => ({ run: initialState(), risk: null, decisions: [] }),
       apply: applyRecord,
-      stateVersion: 1,
+      stateVersion: 2,
     })
   }, 'orc.projection')
   return Object.assign(() => {

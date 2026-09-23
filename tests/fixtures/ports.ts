@@ -45,6 +45,7 @@ import type { OrcConfig, ProviderRoute, Route } from '../../src/domain/types.js'
 import { initialState, reduce, type OrcState } from '../../src/domain/workflow.js'
 import type { CliProbe } from '../../src/host/cli.js'
 import {
+  hasStartRisk,
   orcEventName,
   type OrcJournal,
   type OrcJournalRecord,
@@ -216,16 +217,21 @@ export function fakeJournal(seed: OrcJournalRecord[] = []): FakeJournal {
   const flushCount = { value: 0 }
   const records = new Map<string, OrcRecord[]>()
   const states = new Map<string, OrcState>()
+  const risks = new Map<string, RiskDecision>()
 
   const fold = (): void => {
     records.clear()
     states.clear()
+    risks.clear()
     for (const record of events) {
       const runId = record.data.runId
       const list = records.get(runId) ?? []
       list.push(record.data)
       records.set(runId, list)
       if (record.data.type === 'orc/route') continue
+      // The durable classification lives on the start record, exactly as the
+      // session projection folds it, so a recovery journal exposes it too.
+      if (hasStartRisk(record.data)) risks.set(runId, record.data.risk)
       states.set(runId, reduce(states.get(runId) ?? initialState(), record.data))
     }
   }
@@ -236,6 +242,7 @@ export function fakeJournal(seed: OrcJournalRecord[] = []): FakeJournal {
     sessions,
     flushCount,
     state: (session) => states.get(String(session.id)) ?? initialState(),
+    risk: (session) => risks.get(String(session.id)) ?? null,
     decisions: (session) => routeDecisions(records.get(String(session.id)) ?? []),
     commit: async (session, record) => {
       // Append through the real Session so the durable event vocabulary is

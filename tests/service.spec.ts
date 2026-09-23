@@ -15,8 +15,10 @@ import { RouteError } from '../src/domain/routing.js'
 import { OrcService } from '../src/host/service.js'
 import { ORC_LEAD_LABEL } from '../src/host/service.js'
 import {
+  FAKE_NOW,
   fakePorts,
   HIGH_RISK,
+  SUPERVISOR_ID,
   type FakePorts,
 } from './fixtures/ports.js'
 import { claudeRoute, codexRoute, config as fixtureConfig, planRoute } from './fixtures/routes.js'
@@ -166,6 +168,46 @@ describe('durable ordering', () => {
     expect(results).toHaveLength(1)
     expect(results[0]!.data).toMatchObject({ correlationId: requests[0]!.data.type === 'spec-request' ? requests[0]!.data.correlationId : '' })
     expect(recovered.state(ports.supervisor).phase).toBe('plan')
+  })
+
+  it('replays a start-only log and dispatches without a route decision to fall back on', async () => {
+    const ports = fakePorts()
+    const svc = new OrcService(ports)
+    await svc.start(ports.supervisor, HIGH_RISK)
+    // The log holds nothing but the start record: no route decision exists, so
+    // the activation risk is only recoverable from the start record itself.
+    expect(eventNames(ports)).toEqual(['orc/start'])
+
+    // A restarted process: a fresh service over the same durable log.
+    const recovered = new OrcService({ ...ports, journal: ports.journal.recover() })
+    await expect(recovered.dispatch(ports.supervisor, 'spec', 'spec input', signal))
+      .resolves.toMatchObject({ phase: 'plan' })
+
+    expect(eventNames(ports)).toEqual(['orc/start', 'orc/route', 'orc/spec-request', 'orc/spec-result'])
+    expect(recovered.state(ports.supervisor).phase).toBe('plan')
+  })
+
+  it('heals a start-only log that carries no durable classification', async () => {
+    const ports = fakePorts()
+    // A log written before the classification became durable: a plain start.
+    await ports.journal.commit(ports.supervisor.session, {
+      version: 1,
+      type: 'start',
+      runId: SUPERVISOR_ID,
+      actorId: SUPERVISOR_ID,
+      actor: 'supervisor',
+      at: FAKE_NOW,
+    })
+    const recovered = new OrcService({ ...ports, journal: ports.journal.recover() })
+    await expect(recovered.dispatch(ports.supervisor, 'spec', 'spec input', signal))
+      .rejects.toThrow(/no risk classification/)
+
+    // The replayed activation gate is the only surviving classification, so it
+    // heals the run instead of leaving it permanently unroutable.
+    await recovered.start(ports.supervisor, HIGH_RISK)
+    await expect(recovered.dispatch(ports.supervisor, 'spec', 'spec input', signal))
+      .resolves.toMatchObject({ phase: 'plan' })
+    expect(eventNames(ports)).toEqual(['orc/start', 'orc/route', 'orc/spec-request', 'orc/spec-result'])
   })
 
   it('records a report against an already-committed request', async () => {
