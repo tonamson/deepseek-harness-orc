@@ -36,6 +36,14 @@ export type RiskLevel = 'low' | 'high'
 export interface RiskDecision {
   path: RiskPath
   risk: RiskLevel
+  /**
+   * Stable reason codes. {@link classifyRequest} emits `high-impact`,
+   * `explicit-review`, `substantial`, `scope-escalation`, and
+   * `isolated-low-risk`. The pre-step gate stamps one more — `session-always` —
+   * when the session's ORC mode opens a run for work the classifier would have
+   * left direct, so the durable start record never claims a direct
+   * classification for a run that ORC actually opened.
+   */
   reasons: string[]
 }
 

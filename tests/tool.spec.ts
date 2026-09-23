@@ -12,6 +12,7 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
+import { parseConfig } from '../src/domain/config.js'
 import { ORC_LEAD_LABEL, OrcService } from '../src/host/service.js'
 import { installOrcTool, ORC_POLICY, ORC_SECTION_NAME } from '../src/host/tool.js'
 import { fakePorts, HIGH_RISK, type FakePorts, type PreStepMessage } from './fixtures/ports.js'
@@ -175,6 +176,67 @@ describe('pre-step gate', () => {
 
     expect(decision).toBe(rejected)
     expect(ports.journal.events).toHaveLength(0)
+  })
+
+  it('honors sessionMode: always opens a run for a small request, adaptive leaves it direct', async () => {
+    const request = 'Fix a typo in the README'
+    const admitted: PreStepDecision = { kind: 'enter', messages: [userMessage(request)] }
+
+    const adaptive = fakePorts()
+    const adaptiveService = new OrcService(adaptive)
+    const adaptiveTool = install(adaptive, adaptiveService)
+    expect(adaptive.config.sessionMode).toBe('adaptive')
+    await adaptiveTool.agent.ctx.preStep({ agent: adaptiveTool.agent, messages: [userMessage(request)], signal }, admitted)
+    expect(adaptive.journal.events).toHaveLength(0)
+    expect(adaptiveService.state(adaptiveTool.agent).started).toBe(false)
+
+    const always = fakePorts({ config: parseConfig({ sessionMode: 'always' }) })
+    const alwaysService = new OrcService(always)
+    const alwaysTool = install(always, alwaysService)
+    expect(alwaysService.sessionMode()).toBe('always')
+    const decision = await alwaysTool.agent.ctx.preStep(
+      { agent: alwaysTool.agent, messages: [userMessage(request)], signal },
+      admitted,
+    )
+
+    // The run opens before model execution, and the durable record says why:
+    // the classifier called the request isolated-low-risk, so the gate stamps
+    // `session-always` rather than claiming a direct classification for a run
+    // ORC actually opened.
+    expect(decision).toBe(admitted)
+    expect(always.journal.events[0]!.data).toMatchObject({
+      type: 'start',
+      risk: { path: 'orc', risk: 'low', reasons: ['session-always'] },
+    })
+    expect(alwaysService.state(alwaysTool.agent).phase).toBe('spec')
+
+    // The mode is read live: switching back to adaptive stops new runs.
+    const switched = fakePorts({ config: parseConfig({ sessionMode: 'always' }) })
+    const switchedService = new OrcService(switched)
+    const switchedTool = install(switched, switchedService)
+    switched.config = parseConfig({ sessionMode: 'adaptive' })
+    await switchedTool.agent.ctx.preStep({ agent: switchedTool.agent, messages: [userMessage(request)], signal }, admitted)
+    expect(switched.journal.events).toHaveLength(0)
+  })
+
+  it('does not open a run in always mode for a step with no admitted text', async () => {
+    const ports = fakePorts({ config: parseConfig({ sessionMode: 'always' }) })
+    const service = new OrcService(ports)
+    const { agent } = install(ports, service)
+    const admitted: PreStepDecision = { kind: 'enter', messages: [] }
+
+    await agent.ctx.preStep({ agent, messages: [], signal }, admitted)
+
+    expect(ports.journal.events).toHaveLength(0)
+  })
+
+  it('states the code route scope and both session modes in the policy', () => {
+    // I5: the code route governs only an explicit `code` dispatch, and the
+    // hierarchy inherits the chat-selected route. The policy text, the README,
+    // and the settings copy must agree, so the model-visible rule is pinned.
+    expect(ORC_POLICY).toContain('governs exactly one thing: an explicit `dispatch` with `stage: "code"`')
+    expect(ORC_POLICY).toContain('inherit this session\'s live provider, model, and effort')
+    expect(ORC_POLICY).toContain('`always` mode the ORC run opens for every admitted request')
   })
 
   it('does not open a nested run for a member of an existing run', async () => {

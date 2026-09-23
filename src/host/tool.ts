@@ -46,12 +46,14 @@ export const ORC_SECTION_NAME = 'orc:policy'
 export const ORC_POLICY = `## ORC workflow
 Classify every request before implementing it, and use the \`orc\` tool to record the decision.
 
-- Small, isolated, low-risk work — a typo, a small documentation correction, one contained visual adjustment — may be handled directly, without ORC state.
+- Small, isolated, low-risk work — a typo, a small documentation correction, one contained visual adjustment — may be handled directly, without ORC state, while the session's ORC mode is \`adaptive\`.
+- The session's ORC mode governs how early ORC starts. In \`always\` mode the ORC run opens for every admitted request, however small; in \`adaptive\` mode only the substantial and high-impact work below starts it.
 - Multi-step, multi-file, architectural, explicitly planned, or explicitly reviewed work starts ORC.
 - Money movement, balances, payments, authentication, authorization, security-sensitive behavior, and similarly high-impact paths always start ORC, however small the diff.
 - If direct work reveals substantial scope or high risk before implementation, classify it again with \`discoveredRisk\` set, start ORC, and only then continue implementing.
 
 Once ORC starts, this session is the Supervisor of an ORC run: the run's Lead owns tasks, reviews, and fixes; Peers implement. The ORC service validates role authority, phase order, task settlement, review and audit results, fixes, and completion — a phase or authority refusal is final until the state that caused it changes.
+The Lead and Peer children inherit this session's live provider, model, and effort, because a DSH child agent can only be given a DSH provider route. The configured **code route** — including the DeepSeek Flash v4.1 high default — therefore governs exactly one thing: an explicit \`dispatch\` with \`stage: "code"\`, which ORC routes and runs on that route. It does not move the Supervisor or the hierarchy.
 Review and security audit are separate stages, and the final branch review and audit are separate gates that ORC routes and dispatches itself. Every one of them runs on a route ORC selects; a report you write is never accepted in place of the report the selected backend produced. Critical, high, and medium findings block until they are fixed and re-reviewed. A failed, malformed, missing, or unavailable review or audit is blocking and is never a clean result.`
 
 /** Every action the tool accepts. */
@@ -229,8 +231,18 @@ export function installOrcTool(agent: Agent, service: OrcService): () => void {
   const disposeGate = agent.ctx.on('agent/pre-step', async ({ agent: subject, messages, signal }, next) => {
     const decision: PreStepDecision = await next()
     if (decision.kind === 'reject' || signal.aborted) return decision
-    const risk = riskOf({ request: admittedText(decision.messages) })
-    if (risk.path !== 'orc') return decision
+    const text = admittedText(decision.messages)
+    const classified = riskOf({ request: text })
+    // `always` opens ORC for every admitted request that carries user text.
+    // The gate observes only the request text, so it cannot see the file count
+    // or architecture that make a request trivially direct; rather than guess,
+    // it honors the mode the user selected. A step with no admitted text is not
+    // work, so it stays direct in both modes.
+    const escalated = classified.path !== 'orc' && service.sessionMode() === 'always' && text.trim() !== ''
+    if (classified.path !== 'orc' && !escalated) return decision
+    const risk: RiskDecision = escalated
+      ? { path: 'orc', risk: classified.risk, reasons: ['session-always'] }
+      : classified
     const state = service.state(subject)
     // A member of an existing run is not a Supervisor: its work is governed by
     // the run it already belongs to, so it never opens a nested run.

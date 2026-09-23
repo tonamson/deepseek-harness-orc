@@ -49,6 +49,7 @@ import type {
   CliRoute,
   ProviderRoute,
   Route,
+  SessionMode,
   Stage,
 } from '../domain/types.js'
 import { WorkflowError, reduce, type Actor, type OrcEvent, type OrcState } from '../domain/workflow.js'
@@ -441,6 +442,18 @@ export class OrcService {
   }
 
   /**
+   * The live per-session ORC activation policy.
+   *
+   * The pre-step gate reads it before every admitted step: `always` opens a run
+   * for every admitted request, `adaptive` only for the ones the risk policy
+   * escalates. Read live from the settings bridge, so a mode the user changes
+   * takes effect on the next step without reloading the plugin.
+   */
+  sessionMode(): SessionMode {
+    return this.ports.settings.config().sessionMode
+  }
+
+  /**
    * Verify one route now and record the result.
    *
    * A provider route sends the harmless connection-test request; a CLI route
@@ -500,10 +513,13 @@ export class OrcService {
       this.requireSupervisor(state, supervisor)
       const risk = this.riskOf(runId, session)
       const config = this.ports.settings.config()
-      const catalog = await this.catalogFor(signal)
       const prior = stage === 'audit' ? this.lastReviewDecision(session) : undefined
       let decision: RouteDecision
       try {
+        // The catalog read is inside the blocking guard: a provider discovery
+        // failure is a routing failure, so it blocks the run with an ORC-owned
+        // reason and never puts a raw adapter error in model context.
+        const catalog = await this.catalogFor(signal)
         decision = selectRoute(stage, risk, config, catalog, this.ports.benchmarks, this.now(), prior)
       } catch (error) {
         await this.block(session, runId, `route selection for ${stage} failed: ${safeReason(error)}`)

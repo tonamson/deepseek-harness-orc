@@ -516,6 +516,7 @@ export function OrcSettingsPage(props: OrcSettingsPageProps): ReactElement {
             <option key={routeToken(route)} value={routeToken(route)}>{routeLabel(route)}</option>
           ))}
         </select>
+        <span>{t('codeRouteHint')}</span>
       </p>
 
       <p>

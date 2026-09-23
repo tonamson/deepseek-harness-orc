@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest'
 import { ProviderAdapter, ProviderError } from '../src/host/provider.js'
-import { fakeLlm } from './fixtures/provider.js'
+import { fakeLlm, FAKE_PROVIDER } from './fixtures/provider.js'
 
 const route = { kind: 'provider', provider: 'custom', model: 'm1', effort: 'high' } as const
 it('tests the exact route with a harmless request', async () => {
@@ -182,4 +182,34 @@ it('classifies an effort DSH rejects at dispatch as model-unavailable', async ()
   const llm = fakeLlm({ failure: 'effort-rejected' })
   await expect(new ProviderAdapter(llm).test(route, 'rev-1', new AbortController().signal))
     .resolves.toMatchObject({ ok: false, code: 'model-unavailable' })
+})
+
+// I3: catalog discovery failures are sanitized and never silently shrink the
+// catalog, and a model the adapter cannot describe is not "no efforts".
+it('sanitizes a raw provider discovery failure out of catalog()', async () => {
+  const llm = fakeLlm({ failure: 'discovery' })
+  const failure = await new ProviderAdapter(llm).catalog(FAKE_PROVIDER).catch((error: unknown) => error)
+  expect(failure).toBeInstanceOf(ProviderError)
+  expect(failure).toMatchObject({ name: 'ProviderError', code: 'network', message: 'provider request failed: network' })
+  // The adapter's raw message never escapes.
+  expect(JSON.stringify(failure)).not.toContain('fake provider discovery failed')
+})
+
+it('fails the catalog loudly when one model cannot be resolved, instead of reporting no efforts', async () => {
+  const llm = fakeLlm()
+  llm.failResolve('MISSING_CREDENTIAL')
+  const failure = await new ProviderAdapter(llm).catalog(FAKE_PROVIDER).catch((error: unknown) => error)
+  expect(failure).toMatchObject({ name: 'ProviderError', code: 'authentication' })
+  expect(JSON.stringify(failure)).not.toContain('fake model resolution failed')
+
+  // The same failure on a registered provider's dispatch keeps its own code.
+  const dispatchLlm = fakeLlm()
+  dispatchLlm.failResolve('TRANSPORT')
+  await expect(new ProviderAdapter(dispatchLlm).test(route, 'rev-1', new AbortController().signal))
+    .resolves.toMatchObject({ ok: false, code: 'network' })
+})
+
+it('still catalogs a model the adapter legitimately describes with no efforts', async () => {
+  const snapshot = await new ProviderAdapter(fakeLlm({ efforts: [] })).catalog(FAKE_PROVIDER)
+  expect(snapshot.entries).toEqual([])
 })

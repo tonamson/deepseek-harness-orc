@@ -63,6 +63,8 @@ export interface FakeLlm extends ProviderLlmPort {
   readonly reads: { providers: number; models: number; resolves: number }
   /** Change the failure mode of later dispatches, keeping recorded calls. */
   fail(failure: FakeFailure | undefined): void
+  /** Make later model resolution throw a raw DSH failure code, as a real adapter can. */
+  failResolve(code: string | undefined): void
   /** Replace the advertised effort ids, so a test can invalidate a route mid-flight. */
   setEfforts(efforts: readonly string[]): void
   /** Replace the terminal finish reason later dispatches report. */
@@ -94,6 +96,7 @@ export function fakeLlm(options: FakeLlmOptions = {}): FakeLlm {
   let failure = options.failure
   let efforts: readonly string[] = options.efforts ?? [FAKE_EFFORT]
   let finishReason: FakeFinishReason = options.finishReason ?? 'stop'
+  let resolveFailure: string | undefined
   const calls: FakeLlmCall[] = []
   const reads = { providers: 0, models: 0, resolves: 0 }
   const runtime: FakeLlm = {
@@ -101,6 +104,9 @@ export function fakeLlm(options: FakeLlmOptions = {}): FakeLlm {
     reads,
     fail: (next) => {
       failure = next
+    },
+    failResolve: (code) => {
+      resolveFailure = code
     },
     setEfforts: (next) => {
       efforts = [...next]
@@ -125,6 +131,8 @@ export function fakeLlm(options: FakeLlmOptions = {}): FakeLlm {
     },
     resolveModelInfo: async (provider: string, model: string): Promise<LlmResolvedModelInfo> => {
       reads.resolves += 1
+      // A raw adapter discovery failure, exactly as DSH would let one escape.
+      if (resolveFailure !== undefined) throw new HarnessError('fake model resolution failed', resolveFailure)
       if (provider !== FAKE_PROVIDER || model !== FAKE_MODEL) {
         throw new HarnessError(`no such model "${model}"`, 'MODEL_NOT_FOUND')
       }

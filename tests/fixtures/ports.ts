@@ -296,6 +296,8 @@ export interface FakeProviders extends OrcProviderPort {
   readonly tests: { route: ProviderRoute; revision: string }[]
   failNextTest(code: ProviderErrorCode | undefined): void
   failNextRun(error: Error | undefined): void
+  /** Make the next catalog read throw, as a raw adapter discovery failure does. */
+  failCatalog(error: Error | undefined): void
 }
 
 /** The host-CLI port plus the fixture's recorded dispatches. */
@@ -472,6 +474,7 @@ function fakeProviders(deps: { reports: unknown[] }): FakeProviders {
   const tests: FakeProviders['tests'] = []
   let testFailure: ProviderErrorCode | undefined
   let runFailure: Error | undefined
+  let catalogFailure: Error | undefined
   return {
     runs,
     tests,
@@ -481,11 +484,21 @@ function fakeProviders(deps: { reports: unknown[] }): FakeProviders {
     failNextRun: (error) => {
       runFailure = error
     },
-    catalog: async (provider) => ({
-      id: `${provider}@${FAKE_NOW}`,
-      observedAt: FAKE_NOW,
-      entries: catalog.entries.filter(entry => entry.routeKey.startsWith(`provider:${provider}:`)),
-    }),
+    failCatalog: (error) => {
+      catalogFailure = error
+    },
+    catalog: async (provider) => {
+      if (catalogFailure !== undefined) {
+        const error = catalogFailure
+        catalogFailure = undefined
+        throw error
+      }
+      return {
+        id: `${provider}@${FAKE_NOW}`,
+        observedAt: FAKE_NOW,
+        entries: catalog.entries.filter(entry => entry.routeKey.startsWith(`provider:${provider}:`)),
+      }
+    },
     test: async (route, revision) => {
       tests.push({ route, revision })
       if (testFailure !== undefined) {

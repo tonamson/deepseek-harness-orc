@@ -64,6 +64,13 @@ session. Enabling ORC does not replace the selected preset, change the model, or
 change global defaults; the run's Lead and Peers inherit the Supervisor's live
 provider/model route.
 
+The session's ORC mode decides how early a run opens:
+
+- **Adaptive** (default): the classification below decides.
+- **Always**: an ORC run opens for every admitted request, however small — the
+  pre-step gate sees only the request text, so it does not guess whether a
+  request is trivially direct and honors the mode you chose.
+
 Before implementing, the Supervisor classifies the request:
 
 - Small, isolated, low-risk work — a typo, a small documentation fix, one
@@ -85,9 +92,14 @@ as a clean audit.
 The ORC page lives in the Web settings section and owns only the `orc` settings
 namespace. It configures:
 
-- per-session ORC behavior and the direct-versus-ORC risk policy;
-- the code implementation route (defaulting to the configured DeepSeek Flash
-  v4.1 provider/model at high effort when available);
+- per-session ORC behavior (`adaptive` or `always`) and the direct-versus-ORC
+  risk policy;
+- the code implementation route, defaulting to the configured DeepSeek Flash
+  v4.1 provider/model at high effort when available. **This route governs one
+  thing only: an explicit `dispatch` with `stage: 'code'`.** The run's Lead and
+  Peer children inherit the route you selected in the chat instead, because a
+  DSH child agent can only be given a DSH provider route — a CLI-selected
+  backend never reaches one;
 - allowed backends, and **Manual** per-stage assignments (spec, plan, review,
   audit) or **Auto** routing;
 - DSH provider/model references or a Codex/Claude Code CLI selection;

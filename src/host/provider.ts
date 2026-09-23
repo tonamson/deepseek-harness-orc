@@ -174,12 +174,26 @@ export class ProviderAdapter {
    * {@link test} result, so Task 7's Auto eligibility must require a green
    * `ConnectionResult` bound to this exact `routeKey` and revision; catalog
    * membership alone never admits a route.
+   *
+   * Discovery failures are sanitized exactly like dispatch failures: DSH's
+   * `listModels` and `resolveModelInfo` await the provider adapter's discovery
+   * without normalizing it, so a raw adapter error (a network fault, an auth
+   * rejection, an HTTP body) would otherwise escape verbatim. Every failure
+   * here is reduced to an ORC-owned {@link ProviderError} code, and a model
+   * whose effort lookup fails fails the catalog loudly rather than silently
+   * shrinking it.
    */
   async catalog(provider: string): Promise<CatalogSnapshot> {
     const observedAt = new Date().toISOString()
     const entries: CatalogEntry[] = []
     if (this.llm.listProviders().some(entry => entry.id === provider)) {
-      for (const model of await this.llm.listModels(provider)) {
+      let models: LlmModelInfo[]
+      try {
+        models = await this.llm.listModels(provider)
+      } catch (error) {
+        throw dispatchFailure(safeCode(error))
+      }
+      for (const model of models) {
         if (model.provider !== provider) continue
         const efforts = await this.advertisedEfforts(provider, model.id)
         for (const effort of efforts) {
@@ -306,13 +320,21 @@ export class ProviderAdapter {
     }
   }
 
-  /** Exact efforts the adapter advertises for one model; none means unroutable. */
+  /**
+   * Exact efforts the adapter advertises for one model; none means unroutable.
+   *
+   * A model the adapter describes without a reasoning block advertises no
+   * efforts and contributes no catalog entry — an effort ORC invented could not
+   * be dispatched. A discovery *failure* is not the same thing: it is sanitized
+   * and rethrown, so a transient transport or auth fault cannot masquerade as a
+   * model with no supported effort and silently shrink the catalog.
+   */
   private async advertisedEfforts(provider: string, model: string): Promise<string[]> {
     try {
       const resolved = await this.llm.resolveModelInfo(provider, model)
       return (resolved.reasoning?.efforts ?? []).map(effort => effort.id)
-    } catch {
-      return []
+    } catch (error) {
+      throw dispatchFailure(safeCode(error))
     }
   }
 

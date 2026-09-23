@@ -747,6 +747,25 @@ describe('blocking failures and gates', () => {
     await expect(svc.dispatch(ports.supervisor, 'spec', 'spec input', signal)).rejects.toBeInstanceOf(RouteError)
   })
 
+  it('blocks a catalog failure instead of leaking it, and never reaches the model', async () => {
+    const ports = fakePorts()
+    const svc = new OrcService(ports)
+    await svc.start(ports.supervisor, HIGH_RISK)
+    // A raw provider discovery failure from inside the catalog read.
+    ports.providers.failCatalog(new Error('raw provider transport failure'))
+
+    const failure = await svc.dispatch(ports.supervisor, 'spec', 'spec input', signal).catch((error: unknown) => error)
+    expect(failure).toBeInstanceOf(Error)
+    expect(svc.state(ports.supervisor).phase).toBe('failed')
+    const blocked = ports.journal.events.at(-1)!
+    expect(blocked.type).toBe('orc/fail')
+    // The durable reason is ORC-owned: no raw adapter message, no provider payload.
+    expect(JSON.stringify(blocked)).not.toContain('raw provider transport failure')
+    expect(JSON.stringify(blocked)).toMatch(/route selection for spec failed/)
+    expect(ports.providers.tests).toEqual([])
+    expect(ports.clis.runs).toEqual([])
+  })
+
   it('serializes concurrent mutations on one run', async () => {
     const ports = fakePorts()
     const svc = new OrcService(ports)
