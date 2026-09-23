@@ -26,8 +26,10 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { SettingsScope, SettingsScopeSnapshot } from '@deepseek-ai/dsh-client-ui-settings/client'
+import type { TypertRemoteContribution } from '@deepseek-ai/dsh-typert-protocol'
 import type { CatalogSnapshot, OrcConfig, Route } from '../../src/domain/types.js'
 import { hostRouteKey, type OrcConnectionView, type OrcRemotePort } from '../../src/client/OrcSettingsPage.js'
+import type { OrcRemoteNamespace } from '../../src/client/remote.js'
 
 /** One recorded settings write, including the namespace it targeted. */
 export interface ScopeWrite {
@@ -220,12 +222,21 @@ export function scopeWrites(): ScopeWrite[] {
 export interface FakeRemote extends OrcRemotePort {
   /** Every route the page asked to probe, in order. */
   readonly probes: Route[]
+  /** Every route key the page asked about, in order. */
+  readonly lookups: string[]
   /** How many times the page read the catalog. */
   readonly catalogReads: () => number
   /** The catalog answer; replace to drive an unavailable or stale backend. */
   catalog: CatalogSnapshot
-  /** The recorded-result answer; replace to seed a prior connection. */
-  recorded: OrcConnectionView | null
+  /**
+   * Recorded results keyed by the exact host route key the page asked about.
+   *
+   * Keying by route key is load-bearing: a page that looked a CLI up under the
+   * wrong key would otherwise still be handed an answer.
+   */
+  recorded: Map<string, OrcConnectionView | null>
+  /** The fallback for a route key {@link recorded} does not carry. */
+  recordedDefault: OrcConnectionView | null
   /** The probe answer factory; replace to drive a failure. */
   answer: (route: Route) => OrcConnectionView
 }
@@ -233,20 +244,25 @@ export interface FakeRemote extends OrcRemotePort {
 /**
  * Build the injectable remote port stand-in.
  *
- * @param overrides - replace the catalog, the recorded result, or the probe answer.
+ * @param overrides - replace the catalog, the recorded answers, or the probe answer.
  */
 export function fakeRemote(overrides: {
   catalog?: CatalogSnapshot
   recorded?: OrcConnectionView | null
+  /** Recorded results keyed by exact host route key. */
+  recordedByKey?: Record<string, OrcConnectionView | null>
   answer?: (route: Route) => OrcConnectionView
 } = {}): FakeRemote {
   const probes: Route[] = []
+  const lookups: string[] = []
   let reads = 0
   const remote: FakeRemote = {
     catalog: overrides.catalog ?? fixtureCatalog(),
-    recorded: overrides.recorded ?? null,
+    recorded: new Map(Object.entries(overrides.recordedByKey ?? {})),
+    recordedDefault: overrides.recorded ?? null,
     answer: overrides.answer ?? (route => greenConnection(route)),
     probes,
+    lookups,
     catalogReads: () => reads,
     getCatalog: async () => {
       reads += 1
@@ -256,9 +272,70 @@ export function fakeRemote(overrides: {
       probes.push(route)
       return remote.answer(route)
     },
-    getConnectionResult: async () => remote.recorded,
+    getConnectionResult: async (routeKey) => {
+      lookups.push(routeKey)
+      return remote.recorded.has(routeKey) ? remote.recorded.get(routeKey) ?? null : remote.recordedDefault
+    },
   }
   return remote
+}
+
+/** One `$mount` the client plugin asked the fake Remote service for. */
+export interface FakeMount {
+  readonly contribution: TypertRemoteContribution
+  /** How many times this mount's disposer ran. */
+  disposals: number
+}
+
+/** The fake `ctx.remote` service: a real `$mount` shape plus its recorded mounts. */
+export interface FakeRemoteService {
+  readonly mounts: FakeMount[]
+  /** The ORC namespace a mounted contribution publishes. */
+  orc?: OrcRemoteNamespace
+  /** Make `$mount` refuse instead of publishing a namespace. */
+  failNextMount(error: Error | undefined): void
+  $mount(contribution: TypertRemoteContribution): Promise<() => Promise<void>>
+}
+
+/**
+ * Build the fake Remote service the client plugin mounts through.
+ *
+ * `$mount` records the contribution it was handed and returns the disposer the
+ * real gateway returns, so a test can prove both the exact contribution and the
+ * unload path without a browser transport.
+ */
+export function fakeRemoteService(namespace?: OrcRemoteNamespace): FakeRemoteService {
+  const mounts: FakeMount[] = []
+  let failure: Error | undefined
+  const service: FakeRemoteService = {
+    mounts,
+    failNextMount: (error) => {
+      failure = error
+    },
+    $mount: async (contribution) => {
+      if (failure !== undefined) {
+        const error = failure
+        failure = undefined
+        throw error
+      }
+      const record: FakeMount = { contribution, disposals: 0 }
+      mounts.push(record)
+      service.orc = namespace
+      return async () => {
+        record.disposals += 1
+      }
+    },
+  }
+  return service
+}
+
+/** A minimal `ctx.remote.orc` namespace over a fake port. */
+export function fakeRemoteNamespace(port: OrcRemotePort): OrcRemoteNamespace {
+  return {
+    getCatalog: async signal => ({ ok: true, value: await port.getCatalog(signal ?? new AbortController().signal) }),
+    probe: async (route, signal) => ({ ok: true, value: await port.probe(route, signal ?? new AbortController().signal) }),
+    getConnectionResult: async routeKey => ({ ok: true, value: await port.getConnectionResult(routeKey) }),
+  }
 }
 
 /** One recorded slot entry, as the registry stores it. */
@@ -353,6 +430,8 @@ export interface FakeClientContext extends Context {
   readonly slots: FakeSlots
   readonly locales: FakeLocaleRegistration[]
   readonly boundNamespaces: string[]
+  /** Every service name an injected child fiber declared, in order. */
+  readonly injections: string[]
   /** Run every installed effect in reverse, then collapse the slot registry. */
   dispose(): void
 }
@@ -360,18 +439,21 @@ export interface FakeClientContext extends Context {
 /**
  * Build a Cordis-shaped client context over the supplied slot registry.
  *
- * @param options - the slot registry to use, the resolved scope value, and the
- * services the plugin declared in its Cordis `inject`.
+ * @param options - the slot registry to use, the resolved scope value, the
+ * services the plugin declared in its Cordis `inject`, and an optional `remote`
+ * service the plugin can mount its own contribution through.
  */
 export function fakeClientContext(options: {
   slots: FakeSlots
   initial?: OrcConfig
   activeLocale?: string
   inject?: readonly string[]
+  remote?: unknown
 }): FakeClientContext {
   const effects: Array<() => void> = []
   const locales: FakeLocaleRegistration[] = []
   const boundNamespaces: string[] = []
+  const injections: string[] = []
   const scopes = new Map<string, FakeScope>()
   let active = options.activeLocale ?? 'en'
 
@@ -411,10 +493,19 @@ export function fakeClientContext(options: {
         return created.scope
       },
     },
+    ...options.remote === undefined ? {} : { remote: options.remote },
   }
 
   // Only the declared services are seated, exactly as the Cordis fiber (and the
   // dynamic-package facade) gate them: an undeclared read is undefined here.
+  // `remote` is deliberately *not* in `declared`: it is an optional dependency
+  // the plugin takes through `ctx.inject(['remote'], …)`, so it is reachable
+  // from the injected child context only.
+  const seated = new Set([...declared, ...(options.remote === undefined ? [] : ['remote'])])
+  const child = (deps: readonly string[]): Record<string, unknown> => ({
+    get: (name: string) => (seated.has(name) ? services[name] : undefined),
+    ...Object.fromEntries(Object.entries(services).filter(([name]) => seated.has(name) && deps.includes(name))),
+  })
   const ctx = {
     effect: (execute: () => (() => void) | void) => {
       const disposer = execute()
@@ -427,6 +518,20 @@ export function fakeClientContext(options: {
       effects.push(dispose)
       return dispose
     },
+    get: (name: string) => (seated.has(name) ? services[name] : undefined),
+    inject: (deps: string | readonly string[], callback: (childCtx: unknown) => unknown) => {
+      const names = typeof deps === 'string' ? [deps] : [...deps]
+      injections.push(...names)
+      const missing = names.filter(name => !seated.has(name))
+      let dispose: (() => void) | undefined
+      if (missing.length === 0) {
+        const returned = callback(child(names))
+        if (typeof returned === 'function') dispose = returned as () => void
+      }
+      const teardown = (): void => dispose?.()
+      effects.push(teardown)
+      return teardown
+    },
     ...Object.fromEntries(Object.entries(services).filter(([name]) => declared.has(name))),
     dispose: () => {
       for (const dispose of [...effects].reverse()) dispose()
@@ -435,6 +540,7 @@ export function fakeClientContext(options: {
     },
     locales,
     boundNamespaces,
+    injections,
   }
   return ctx as unknown as FakeClientContext
 }

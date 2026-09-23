@@ -14,15 +14,18 @@ import React from 'react'
 import '@testing-library/jest-dom/vitest'
 import { act, cleanup, render } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { OrcSettingsPage } from '../src/client/OrcSettingsPage.js'
 import { apply, applyClient, inject } from '../src/client/index.js'
 import { en, zh } from '../src/client/locales.js'
+import { ORC_REMOTE_CONTRIBUTION, OrcRemoteUnavailableError } from '../src/client/remote.js'
 import {
   codexRoute,
   failedConnection,
   fakeClientContext,
   fakeRemote,
+  fakeRemoteNamespace,
+  fakeRemoteService,
   fakeScope,
   fakeSlots,
   fixtureCatalog,
@@ -44,6 +47,7 @@ const FIELD_LABELS = [
   'Plan route',
   'Review route',
   'Audit route',
+  'Route',
   'Codex CLI path',
   'Claude Code path',
   'Maximum cost (USD)',
@@ -117,12 +121,79 @@ describe('OrcSettingsPage', () => {
 
   it('shows the recorded CLI authentication result from the remote face', async () => {
     const remote = fakeRemote({
-      recorded: failedConnection(codexRoute, 'authentication', 'codex is not authenticated'),
+      recordedByKey: { 'cli:codex:gpt-6-sol:high': failedConnection(codexRoute, 'authentication', 'codex is not authenticated') },
     })
     const ui = render(<OrcSettingsPage scope={scope('orc')} remote={remote} locale="en" />)
 
     await ui.findByText('Version 0.156.1')
-    expect(ui.getAllByText('Not authenticated')).toHaveLength(2)
+    // The page asked under the exact host route keys, so a lookup under the
+    // wrong key could not have produced the recorded failure: only Codex is
+    // unauthenticated, and Claude falls back to the catalog's own observation.
+    expect(remote.lookups).toEqual(['cli:codex:gpt-6-sol:high', 'cli:claude:claude-opus-4-1:high'])
+    expect(ui.getAllByText('Not authenticated')).toHaveLength(1)
+    expect(ui.getAllByText('Authenticated')).toHaveLength(1)
+  })
+
+  it('reports the unavailable state, not a raw error, when no remote face is mounted', async () => {
+    const port = {
+      getCatalog: async () => {
+        throw new OrcRemoteUnavailableError()
+      },
+      probe: async () => {
+        throw new OrcRemoteUnavailableError()
+      },
+      getConnectionResult: async () => {
+        throw new OrcRemoteUnavailableError()
+      },
+    }
+    const ui = render(<OrcSettingsPage scope={scope('orc')} remote={port} locale="en" />)
+
+    expect(await ui.findByText('The ORC remote face is unavailable in this profile')).toBeVisible()
+  })
+
+  it('allowlists a typed route without any catalog or discoverable backend', async () => {
+    const user = userEvent.setup()
+    const fake = fakeScope('orc')
+    // A fresh install: an empty policy and a catalog that discovers nothing.
+    fake.push({
+      sessionMode: 'adaptive',
+      codeRoute: undefined,
+      analysisMode: 'auto',
+      manual: { spec: undefined, plan: undefined, review: undefined, audit: undefined },
+      allowed: [],
+      cliPaths: {},
+      catalogMaxAgeDays: 7,
+    })
+    const empty = { id: 'catalog-empty', observedAt: '2026-09-23T00:00:00Z', entries: [] }
+    const ui = render(<OrcSettingsPage scope={fake.scope} remote={fakeRemote({ catalog: empty })} locale="en" />)
+
+    await ui.findByText('No backend is discoverable yet; type a route above to allowlist one.')
+    expect(ui.queryAllByRole('checkbox')).toHaveLength(0)
+
+    const entry = ui.getByLabelText('Route')
+    await user.type(entry, 'provider:bai:deepseek-v4.1-flash:high')
+    await user.click(ui.getByRole('button', { name: 'Allowlist route' }))
+
+    expect(fake.writes.map(write => write.field)).toEqual(['allowed'])
+    expect(fake.value().allowed).toEqual([
+      { kind: 'provider', provider: 'bai', model: 'deepseek-v4.1-flash', effort: 'high' },
+    ])
+    expect(ui.getByText('Allowlisted bai deepseek-v4.1-flash high')).toBeVisible()
+    // The newly allowed route is now a candidate everywhere else on the page.
+    expect(ui.getByRole('checkbox', { name: 'bai deepseek-v4.1-flash high' })).toBeChecked()
+
+    // A malformed token is refused before it can reach the host.
+    await user.type(entry, 'not-a-route')
+    await user.click(ui.getByRole('button', { name: 'Allowlist route' }))
+    expect(ui.getByText('A route reads provider:<provider>:<model>:<effort> or codex|claude:<model>:<effort>')).toBeVisible()
+    expect(fake.writes).toHaveLength(1)
+
+    // An already allowed route is refused too, so the allowlist cannot repeat.
+    await user.clear(entry)
+    await user.type(entry, 'provider:bai:deepseek-v4.1-flash:high')
+    await user.click(ui.getByRole('button', { name: 'Allowlist route' }))
+    expect(ui.getByText('That route is already on the allowlist')).toBeVisible()
+    expect(fake.writes).toHaveLength(1)
   })
 
   it('displays the exact failure code and diagnostic a probe returned', async () => {
@@ -280,8 +351,71 @@ describe('OrcSettingsPage', () => {
 
 describe('ORC client entry', () => {
   it('declares exactly the client services it consumes', () => {
+    // `remote` is deliberately absent: it is an optional dependency taken
+    // through `ctx.inject`, so a profile without the Remote client still mounts
+    // the settings page.
     expect([...inject].sort()).toEqual(['locale', 'settingsScope', 'slots'])
     expect(inject).not.toContain('remote')
+  })
+
+  it('mounts its own Remote contribution through ctx.remote.$mount and disposes it on unload', async () => {
+    const slots = fakeSlots()
+    const service = fakeRemoteService(fakeRemoteNamespace(fakeRemote()))
+    const ctx = fakeClientContext({ slots, inject: [...inject], remote: service })
+
+    applyClient(ctx)
+
+    // The mount goes through the public API with the exact contribution this
+    // package owns: three ORC endpoints and nothing else.
+    expect(ctx.injections).toEqual(['remote'])
+    await vi.waitFor(() => expect(service.mounts).toHaveLength(1))
+    const [mount] = service.mounts
+    expect(mount.contribution).toBe(ORC_REMOTE_CONTRIBUTION)
+    expect(mount.contribution.package).toBe('@tonamson/dsh-orc')
+    expect(mount.contribution.descriptors.map(descriptor => `${descriptor.namespace}/${descriptor.method}`))
+      .toEqual(['orc/getCatalog', 'orc/probe', 'orc/getConnectionResult'])
+    expect(mount.disposals).toBe(0)
+
+    ctx.dispose()
+
+    await vi.waitFor(() => expect(mount.disposals).toBe(1))
+    expect(slots.ids('settings.section')).toEqual([])
+  })
+
+  it('keeps the settings page mounted when the profile has no Remote service', async () => {
+    const slots = fakeSlots()
+    const ctx = fakeClientContext({ slots, inject: [...inject] })
+
+    applyClient(ctx)
+
+    expect(ctx.injections).toEqual(['remote'])
+    expect(slots.ids('settings.section')).toEqual(['orc'])
+
+    // The page's port reports the missing face instead of hanging.
+    const [entry] = slots.entries('settings.section')
+    const face = entry.inject?.() ?? {}
+    const Component = entry.component as React.ComponentType<Record<string, unknown>>
+    const ui = render(React.createElement(Component, face))
+    expect(await ui.findByText('The ORC remote face is unavailable in this profile')).toBeVisible()
+    expect(ui.getByLabelText('Route')).toBeVisible()
+  })
+
+  it('serves the page from the mounted contribution, not a stand-in', async () => {
+    const slots = fakeSlots()
+    const port = fakeRemote()
+    const service = fakeRemoteService(fakeRemoteNamespace(port))
+    const ctx = fakeClientContext({ slots, inject: [...inject], remote: service })
+
+    applyClient(ctx)
+    await vi.waitFor(() => expect(service.mounts).toHaveLength(1))
+
+    const [entry] = slots.entries('settings.section')
+    const face = entry.inject?.() ?? {}
+    const Component = entry.component as React.ComponentType<Record<string, unknown>>
+    const ui = render(React.createElement(Component, face))
+
+    await ui.findByText('Version 0.156.1')
+    expect(port.catalogReads()).toBe(1)
   })
 
   it('cannot mount when its declared services are not seated', () => {

@@ -8,12 +8,18 @@
  * request, and no rendered string carries a provider token or a native CLI
  * credential, because DSH owns both.
  *
- * The remote face arrives as an injected port ({@link OrcRemotePort}) rather
- * than being resolved from `ctx.remote` here. That keeps the page correct and
- * testable in a clean Web profile, where the DSH-owned client assembly mounts
- * only its own fixed `/remote` import list and therefore exposes no
- * `ctx.remote.orc`; a future DSH client mount path supplies the real face
- * through {@link OrcSettingsPageProps.remote}.
+ * The remote face arrives as an injected port ({@link OrcRemotePort}). In a
+ * clean Web profile the bundle's own client plugin mounts the ORC Remote
+ * contribution through `ctx.remote.$mount(...)` and hands the page the mounted
+ * port; a composition that mounts no Remote service hands it a port that
+ * reports {@link OrcRemoteUnavailableError}, and the page renders its
+ * "unavailable" state instead of failing.
+ *
+ * The page never depends on the catalog to be configurable: the allowlist can
+ * always be extended by typing a route ({@link parseRouteToken}), so a fresh
+ * install with an empty configuration and no discoverable backend can still
+ * allowlist its first provider or CLI route. The live catalog only *adds*
+ * candidates.
  *
  * Connection-test binding: a green result is stored with the exact config
  * identity ({@link configIdentity}) it was tested against, so any relevant
@@ -28,6 +34,7 @@ import type { SettingsScope } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
 import type { AnalysisStage, CatalogEntry, CatalogSnapshot, CliName, OrcConfig, Route } from '../domain/types.js'
 import { dictionary, translate, type OrcLocaleKey } from './locales.js'
+import { OrcRemoteUnavailableError } from './remote.js'
 
 /** The analysis stages Manual mode assigns one route each. */
 export const ANALYSIS_STAGES: readonly AnalysisStage[] = ['spec', 'plan', 'review', 'audit']
@@ -105,6 +112,9 @@ interface TestedResult {
   readonly connection: OrcConnectionView
   readonly identity: string
 }
+
+/** One refused route-entry token, and the copy that explains it. */
+type RouteEntryProblem = 'routeEntryEmpty' | 'routeEntryInvalid' | 'routeEntryPresent'
 
 /**
  * The page's route token.
@@ -221,6 +231,19 @@ function belowFloor(version: string, floor: string): boolean {
 const entryFor = (catalog: CatalogSnapshot | undefined, route: Route): CatalogEntry | undefined =>
   catalog?.entries.find(entry => entry.routeKey === hostRouteKey(route))
 
+/**
+ * The copy one failed remote call renders.
+ *
+ * A profile that mounts no ORC Remote face at all is not an error: it is the
+ * page's explicit "unavailable" state, in the active locale. Anything else is
+ * the failure's own message, which the Remote carrier already reduced to a
+ * safe, credential-free string.
+ */
+const messageOf = (error: unknown, t: Translate<OrcLocaleKey>): string => {
+  if (error instanceof OrcRemoteUnavailableError) return t('unavailable')
+  return error instanceof Error ? error.message : String(error)
+}
+
 /** The catalog observation for one host CLI. */
 const cliEntry = (catalog: CatalogSnapshot | undefined, cli: CliName): CatalogEntry | undefined =>
   catalog?.entries.find(entry => entry.routeKey.startsWith(`cli:${cli}:`))
@@ -278,9 +301,17 @@ export function OrcSettingsPage(props: OrcSettingsPageProps): ReactElement {
   const [tested, setTested] = useState<TestedResult | undefined>(undefined)
   const [probeError, setProbeError] = useState<string | undefined>(undefined)
   const [probing, setProbing] = useState(false)
+  const [entry, setEntry] = useState('')
+  const [entryProblem, setEntryProblem] = useState<RouteEntryProblem | undefined>(undefined)
+  const [entryAdded, setEntryAdded] = useState<string | undefined>(undefined)
   const probeController = useRef<AbortController | undefined>(undefined)
 
   useEffect(() => () => probeController.current?.abort(), [])
+
+  // The catalog read is keyed on the resolved policy, not just on the remote
+  // port: a route the user just allowed must become observable without a page
+  // reload, and a port whose mount resolves after the first render retries here.
+  const policy = config === undefined ? '' : configIdentity(config)
 
   useEffect(() => {
     if (remote === undefined) return
@@ -291,6 +322,7 @@ export function OrcSettingsPage(props: OrcSettingsPageProps): ReactElement {
       const liveCatalog = await remote.getCatalog(controller.signal)
       if (!live) return
       setCatalog(liveCatalog)
+      setCatalogError(undefined)
       if (initial === undefined) return
       const routes = candidateRoutes(initial, undefined)
       const recorded: Partial<Record<CliName, OrcConnectionView | null>> = {}
@@ -301,13 +333,13 @@ export function OrcSettingsPage(props: OrcSettingsPageProps): ReactElement {
       }
       if (live) setAuth(recorded)
     })().catch((error: unknown) => {
-      if (live) setCatalogError(error instanceof Error ? error.message : String(error))
+      if (live) setCatalogError(messageOf(error, t))
     })
     return () => {
       live = false
       controller.abort()
     }
-  }, [remote, scope])
+  }, [remote, scope, policy, t])
 
   if (config === undefined) {
     return (
@@ -375,10 +407,40 @@ export function OrcSettingsPage(props: OrcSettingsPageProps): ReactElement {
       const connection = await remote.probe(route, controller.signal)
       setTested({ connection, identity: configIdentity(config) })
     } catch (error: unknown) {
-      setProbeError(error instanceof Error ? error.message : String(error))
+      setProbeError(messageOf(error, t))
     } finally {
       setProbing(false)
     }
+  }
+
+  /**
+   * Allowlist one typed route.
+   *
+   * This is the page's catalog-independent path: a fresh install whose
+   * configuration is empty and whose catalog is therefore empty can still add
+   * its first provider or CLI route, which is what every other control needs.
+   * The token is validated here before it reaches the host, which validates it
+   * again on write.
+   */
+  const onAddRoute = (): void => {
+    const token = entry.trim()
+    if (token === '') {
+      setEntryProblem('routeEntryEmpty')
+      return
+    }
+    const route = parseRouteToken(token)
+    if (route === undefined) {
+      setEntryProblem('routeEntryInvalid')
+      return
+    }
+    if (allowedTokens.has(routeToken(route))) {
+      setEntryProblem('routeEntryPresent')
+      return
+    }
+    setEntryProblem(undefined)
+    setEntryAdded(routeLabel(route))
+    setEntry('')
+    writeAllowed(route, true)
   }
 
   const onSave = async (): Promise<void> => {
@@ -526,6 +588,27 @@ export function OrcSettingsPage(props: OrcSettingsPageProps): ReactElement {
           ))}
         </select>
       </p>
+
+      <fieldset>
+        <legend>{t('routeEntry')}</legend>
+        <p>{t('routeEntryHint')}</p>
+        <p>
+          <label htmlFor="orc-route-entry">{t('routeEntryLabel')}</label>
+          <input
+            id="orc-route-entry"
+            type="text"
+            placeholder={t('routeEntryPlaceholder')}
+            value={entry}
+            onChange={event => {
+              setEntry(event.target.value)
+              setEntryProblem(undefined)
+            }}
+          />
+          <button type="button" onClick={onAddRoute}>{t('routeEntryAdd')}</button>
+        </p>
+        {entryProblem === undefined ? null : <p>{t(entryProblem)}</p>}
+        {entryAdded === undefined ? null : <p>{t('routeEntryAdded', { route: entryAdded })}</p>}
+      </fieldset>
 
       <fieldset>
         <legend>{t('allowedBackends')}</legend>

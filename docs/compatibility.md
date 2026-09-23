@@ -389,15 +389,67 @@ exactly what Step 3a's stated proof requires.
   artifact at all (SRC discovery) and can additionally be served by a
   hand-written `ctx.typert.register()` contribution; a client `./remote`
   contribution can be hand-authored and is validated structurally.
-- What is genuinely unavailable is the **client mount path in a clean Web
-  profile**: `ctx.remote.orc` appears only if DSH adds this package to
-  `@deepseek-ai/dsh-api-remotes`, or if this bundle's own client plugin mounts
-  its own hand-written contribution through the public `ctx.remote.$mount()`
-  (API-permitted, but a composition decision the controller must make, and not
-  the proof Step 3a describes).
+- What is genuinely unavailable is **discovery**: `ctx.remote.orc` appears only
+  if DSH adds this package to `@deepseek-ai/dsh-api-remotes`, or if this
+  bundle's own client plugin mounts its own hand-written contribution through
+  the public `ctx.remote.$mount()`.
 - `./typert` and `./remote` therefore stay **undeclared** in `package.json`:
   the loader imports a declared `./typert` export and fails loud on a broken
   artifact, and this bundle has none to declare.
+
+### Controller adjudication (final fix wave): the client plugin mounts its own contribution
+
+The earlier conclusion that no public client mount path exists was **wrong**, and
+the Step 3a ruling is revised accordingly. `ctx.remote.$mount(contribution)` is
+documented public API on the published client face
+(`dsh-typert-protocol/lib/types/types.d.ts:225-230` declares
+`TypertRemoteContribution`; `dsh-api-gateway/lib/types/client/index.js:80-88`
+implements `$mount`), and DSH's own client assembly is its only caller
+(`dsh-api-remotes/lib/types/client/index.js:36`:
+`disposers.push(await ctx.remote.$mount(contribution))`). A client plugin that
+holds `ctx.remote` may therefore mount its own contribution in its own fiber.
+
+`src/client/remote.ts` is that contribution, hand-written and plain data:
+
+- `{ package: '@tonamson/dsh-orc', descriptors: [...] }` with one descriptor per
+  host `@Remote` method — `orc/getCatalog` (no business parameters, `signal`
+  cancellation), `orc/probe` (`route`), `orc/getConnectionResult` (`routeKey`);
+- strict input codecs, which the client Gateway requires
+  (`requireStrictInputs`/`requireStrictCodec`,
+  `dsh-api-gateway/lib/types/client/index.js:499-512`), and `src-json` result
+  codecs;
+- a merge-declared `TypertRemoteNamespaceMap.orc` entry so `ctx.remote.orc`
+  type-checks without a generated artifact.
+
+`src/client/index.tsx` mounts it through `ctx.inject(['remote'], …)` — an
+*optional* dependency, so a profile with no Remote client still mounts the
+settings page — and disposes the returned `$mount` disposer on unload.
+`tests/client.spec.tsx` pins both: the exact contribution is handed to
+`$mount`, the mount is disposed on `ctx.dispose()`, and the page is served from
+the mounted namespace.
+
+Consequence for the archive: the clean Web profile now exposes `ctx.remote.orc`,
+and `README.md` limitation #1 is corrected. `./typert` and `./remote` remain
+undeclared, and a profile whose client mounts no Remote service still shows the
+page's explicit unavailable state — which is why the page also carries a
+catalog-independent route entry (see below).
+
+### The page is configurable without a catalog
+
+Mounting the Remote face is necessary but not sufficient for the Critical
+finding that the shipped page could not configure any route: `getCatalog` only
+observes the routes the policy *already* names, so a fresh install with an empty
+Loader-row config produced an empty catalog and therefore zero allowlist
+checkboxes — a chicken-and-egg the mount alone cannot break.
+
+`OrcSettingsPage` therefore also carries a free-text **route entry**: a user
+types `provider:<provider>:<model>:<effort>` or
+`<codex|claude>:<model>:<effort>`, the page validates it locally
+(`parseRouteToken`) and allowlists it through the same revision-fenced settings
+scope every other control uses. The host validates it again on write. That makes
+the page able to configure its first route with no catalog, no discoverable
+backend, and no Remote face at all. The catalog remains the only source of
+*discovered* candidates; it never gates configuration.
 
 ## Task 10 release gate
 

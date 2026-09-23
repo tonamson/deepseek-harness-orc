@@ -184,15 +184,22 @@ the set is updated.
 
 ## Known limitations
 
-1. **The Remote face is unavailable in a clean Web profile.** DSH's Web client
-   assembly mounts a fixed build-time list of `/remote` artifacts and discovers
-   nothing at runtime, and the published Typert generator cannot build the wire
-   artifacts for an external package. `ctx.remote.orc` therefore does not exist
-   in a clean profile, and the ORC settings page renders *"The ORC remote face is
-   unavailable in this profile"* — no catalog, no connection probe, and no CLI
-   health readout — until DSH publishes a client mount path for external
-   bundles. The Host service, `orc` tool, policy, durable journal, and the
-   settings page itself all work. Evidence: the Step 3a section of
+1. **The ORC Remote face is mounted by this bundle's own client plugin, and by
+   nothing else.** DSH's Web client assembly value-imports a fixed build-time
+   list of `/remote` artifacts and discovers nothing at runtime, so
+   `ctx.remote.orc` does not exist in a clean profile until the ORC client
+   plugin mounts its own hand-written contribution through the public
+   `ctx.remote.$mount(...)` API. That is exactly what the shipped plugin does,
+   so the settings page reads the live catalog, probes a route, and shows CLI
+   health in a clean Web profile. Two consequences remain. `./typert` and
+   `./remote` are still deliberately **not** declared as package exports: the
+   Typert loader fails loud on a declared-but-missing artifact, and the
+   published generator cannot build them for an external package — the
+   contribution is hand-written plain data instead, which the client Gateway
+   validates structurally. And a profile that mounts no Remote client service
+   at all shows the page's explicit *"The ORC remote face is unavailable in this
+   profile"* state: the page still works there, because its route entry control
+   does not depend on the catalog. Evidence: the Step 3a section of
    [`docs/compatibility.md`](docs/compatibility.md).
 2. **A session that ran ORC cannot be resumed by DSH `0.1.6-alpha.2`.** ORC's
    `orc/*` session events are outside DSH's `KNOWN_SESSION_EVENT_TYPES`, and the
