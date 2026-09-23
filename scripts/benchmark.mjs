@@ -9,9 +9,10 @@
  *   keyless: it reads local JSON only and never opens a network connection.
  * - A scoring run turns a recorded or explicitly invoked route run into one
  *   versioned evidence record. It refuses to run without explicit route
- *   selection (`--backend`, `--model`, `--effort`) and an input
- *   (`--responses <file>` or `--command <executable>`), and it never guesses a
- *   route, falls back to another backend, or calls a model on its own.
+ *   selection (`--backend`, `--model`, `--effort`, `--version`) and an input
+ *   (`--responses <file>` or a `--command`/`--command-json` invocation), and it
+ *   never guesses a route, falls back to another backend, or calls a model on
+ *   its own.
  *
  * The fixture digest is SHA-256 over the canonical projection
  * `{ id, scope, code, expected }`, so a changed code sample or expectation
@@ -20,8 +21,20 @@
  *
  * A recorded responses file is JSON mapping fixture id to either an array of
  * finding ids or raw model text containing one `FINDING: <id>` line per
- * finding. `--command` is spawned once per fixture with the fixture prompt on
- * stdin and its stdout parsed the same way.
+ * finding.
+ *
+ * A live invocation is spawned once per fixture with the fixture prompt on
+ * stdin and its stdout parsed the same way. The argv is explicit and never
+ * shell-interpolated, and there are two equivalent ways to write one:
+ *
+ * ```
+ * --command codex --arg exec --arg --json --arg -
+ * --command-json '["codex","exec","--json","-"]'
+ * ```
+ *
+ * `--version` is required for a scoring run: an evidence record whose
+ * `backendVersion` is empty can never be admissible (R22), so the runner
+ * refuses to write one.
  */
 
 import { spawn } from 'node:child_process'
@@ -47,9 +60,9 @@ function fail(message) {
   process.exit(1)
 }
 
-/** Parse `--flag value` pairs plus the two boolean flags; reject anything else. */
+/** Parse `--flag value` pairs, the repeated `--arg` list, and the two boolean flags. */
 function parseArgs(argv) {
-  const args = { flags: new Set() }
+  const args = { flags: new Set(), args: [] }
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index]
     if (token === '--verify-fixtures' || token === '--write-manifest') {
@@ -58,11 +71,49 @@ function parseArgs(argv) {
     }
     if (!token.startsWith('--')) fail(`unexpected argument "${token}"`)
     const value = argv[index + 1]
+    // `--arg` is repeatable and its value is taken verbatim — a CLI flag such
+    // as `--json` is exactly the argument it exists to carry.
+    if (token === '--arg') {
+      if (value === undefined) fail('--arg needs a value')
+      args.args.push(value)
+      index += 1
+      continue
+    }
     if (value === undefined || value.startsWith('--')) fail(`unknown flag or missing value for "${token}"`)
     args[token.slice(2)] = value
     index += 1
   }
   return args
+}
+
+/**
+ * The exact argv a live scoring run spawns, or a refusal.
+ *
+ * Two spellings, never mixed: `--command <executable>` plus zero or more
+ * `--arg <value>` elements, or `--command-json <json string array>` carrying
+ * the whole argv including its executable. Both keep the prompt on stdin.
+ */
+function commandArgv(args) {
+  if (args.command !== undefined && args['command-json'] !== undefined) {
+    fail('refusing to run: pass either --command or --command-json, not both')
+  }
+  if (args.args.length > 0 && args.command === undefined) {
+    fail('refusing to run: --arg supplies an argument for --command <executable>')
+  }
+  if (args['command-json'] !== undefined) {
+    let parsed
+    try {
+      parsed = JSON.parse(args['command-json'])
+    } catch (error) {
+      fail(`--command-json must be a JSON string array: ${String(error)}`)
+    }
+    if (!Array.isArray(parsed) || parsed.length === 0 || parsed.some(entry => typeof entry !== 'string' || entry.length === 0)) {
+      fail('--command-json must be a non-empty JSON array of non-empty strings')
+    }
+    return [...parsed]
+  }
+  if (args.command === undefined) return undefined
+  return [args.command, ...args.args]
 }
 
 const canonicalFixture = fixture =>
@@ -152,16 +203,23 @@ const promptFor = fixture => [
 ].join('\n')
 
 /** Spawn the explicitly selected route invocation with no shell and no fallback. */
-function runCommand(command, input) {
+function runCommand(argv, input) {
   return new Promise((resolveRun, rejectRun) => {
-    const child = spawn(command, [], { stdio: ['pipe', 'pipe', 'pipe'] })
+    const [executable, ...rest] = argv
+    let child
+    try {
+      child = spawn(executable, rest, { stdio: ['pipe', 'pipe', 'pipe'] })
+    } catch (error) {
+      rejectRun(new Error(`could not start "${executable}": ${String(error?.message ?? error)}`))
+      return
+    }
     let stdout = ''
     let stderr = ''
     child.stdout.setEncoding('utf8')
     child.stderr.setEncoding('utf8')
     child.stdout.on('data', chunk => { stdout += chunk })
     child.stderr.on('data', chunk => { stderr += chunk })
-    child.on('error', rejectRun)
+    child.on('error', error => rejectRun(new Error(`could not start "${executable}": ${String(error?.message ?? error)}`)))
     child.on('close', code => code === 0
       ? resolveRun(stdout)
       : rejectRun(new Error(`command exited ${code}: ${stderr.trim()}`)))
@@ -169,7 +227,7 @@ function runCommand(command, input) {
   })
 }
 
-async function collect(fixtures, args) {
+async function collect(fixtures, args, argv) {
   if (args.responses !== undefined) {
     const recorded = JSON.parse(await readFile(resolve(args.responses), 'utf8'))
     const responses = {}
@@ -178,7 +236,7 @@ async function collect(fixtures, args) {
   }
   const started = Date.now()
   const responses = {}
-  for (const fixture of fixtures) responses[fixture.id] = await runCommand(args.command, promptFor(fixture))
+  for (const fixture of fixtures) responses[fixture.id] = await runCommand(argv, promptFor(fixture))
   return { responses, latencyMs: Date.now() - started }
 }
 
@@ -234,18 +292,30 @@ process.stdout.write(
 
 if (args.flags.has('--verify-fixtures')) process.exit(0)
 
-const missing = ['backend', 'model', 'effort'].filter(key => args[key] === undefined)
+const missing = ['backend', 'model', 'effort', 'version'].filter(key => args[key] === undefined)
 if (missing.length > 0) {
   fail(`refusing to run: select an explicit route with ${missing.map(key => `--${key} <value>`).join(' ')}`)
 }
-if (args.responses === undefined && args.command === undefined) {
-  fail('refusing to run: pass --responses <file> for a recorded run or --command <executable> to invoke the selected route')
+if (args.version.trim() === '') {
+  // R22: an empty backend version can never be admissible evidence, so writing
+  // such a record would only produce a file the router must refuse.
+  fail('refusing to run: --version must name the exact backend version the run measured (an empty version is never admissible evidence)')
 }
-if (args.responses !== undefined && args.command !== undefined) {
-  fail('refusing to run: pass either --responses or --command, not both')
+const argv = commandArgv(args)
+if (args.responses === undefined && argv === undefined) {
+  fail('refusing to run: pass --responses <file> for a recorded run, or --command <executable> [--arg <value> …] / --command-json <json argv> to invoke the selected route')
+}
+if (args.responses !== undefined && argv !== undefined) {
+  fail('refusing to run: pass either --responses or --command/--command-json, not both')
 }
 
-const { responses, latencyMs } = await collect(fixtures, args)
+let outcome
+try {
+  outcome = await collect(fixtures, args, argv)
+} catch (error) {
+  fail(`the selected route run failed: ${String(error?.message ?? error)}`)
+}
+const { responses, latencyMs } = outcome
 const result = score(fixtures, responses)
 const date = args.date ?? new Date().toISOString()
 const record = {
@@ -254,7 +324,7 @@ const record = {
   backend: args.backend,
   model: args.model,
   effort: args.effort,
-  backendVersion: args.version ?? '',
+  backendVersion: args.version,
   date,
   scope: SCOPE,
   detectionScore: result.detectionScore,

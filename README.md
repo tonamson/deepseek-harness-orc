@@ -124,17 +124,24 @@ never falls back to a packaged runtime.
 
 ## Benchmark evidence
 
-The bundle ships known-bug and false-positive fixtures under `benchmarks/`.
-Verify the fixture manifest keylessly:
+The bundle ships known-bug and false-positive fixtures under `benchmarks/` and
+the runner that scores a route against them under `scripts/`. Verify the fixture
+manifest keylessly — no model, no network, no credential:
 
 ```sh
 node scripts/benchmark.mjs --verify-fixtures
 ```
 
-`benchmarks/evidence/` is **empty on a fresh install**, so the fail-closed
-evidence snapshot excludes every high-risk review and audit and Auto routing
-refuses them until evidence exists. Generate one versioned evidence record per
-selected route from a recorded or explicitly invoked run:
+**A fresh install ships no evidence records.** `benchmarks/evidence/` does not
+exist until you generate a record, so the fail-closed evidence snapshot excludes
+every high-risk review and audit: Auto routing refuses those stages with
+`no-qualifying-route`, and the run stops and asks you to configure another route
+or generate evidence. ORC does not ship a record because a benchmark score is
+only meaningful when it measures a real run of the route you selected; an
+invented score would be worse than none.
+
+Generate one versioned record per route you want high-risk review and audit
+routed to. From a recorded run:
 
 ```sh
 node scripts/benchmark.mjs \
@@ -142,10 +149,27 @@ node scripts/benchmark.mjs \
   --responses recorded-responses.json
 ```
 
-`--command <executable>` runs an explicitly selected route instead of a recorded
-file. The runner refuses to guess a route, never calls a model on its own, and
-never falls back to another backend. High-risk Auto routing requires the
-resulting records.
+Or by invoking the selected CLI directly. The argv is explicit and is never
+shell-interpolated: pass the executable with `--command` and each argument with
+its own repeated `--arg`, or pass the whole argv as JSON with `--command-json`.
+The fixture prompt stays on stdin in both forms.
+
+```sh
+node scripts/benchmark.mjs \
+  --backend codex --model gpt-5.2-codex --effort high --version 0.156.1 \
+  --command codex --arg exec --arg --json --arg -
+
+node scripts/benchmark.mjs \
+  --backend claude --model claude-opus-4-1 --effort high --version 2.1.280 \
+  --command-json '["claude","--print"]'
+```
+
+`--version` is required for a scoring run: an evidence record whose
+`backendVersion` is empty can never be admissible, so the runner refuses to
+write one. The runner never guesses a route, never calls a model on its own, and
+never falls back to another backend. Records are written to
+`benchmarks/evidence/` (gitignored) and are read by the Host when the profile
+loads, so restart the profile after generating them.
 
 ## Supported DSH versions
 

@@ -71,7 +71,7 @@ const EvidenceSchema = z.object({
 })
 
 /** The directory the benchmark runner writes evidence records into. */
-const EVIDENCE_DIR = new URL('../../benchmarks/evidence/', import.meta.url)
+export const EVIDENCE_DIR = new URL('../../benchmarks/evidence/', import.meta.url)
 
 /**
  * Load the versioned benchmark evidence this bundle ships.
@@ -82,17 +82,21 @@ const EVIDENCE_DIR = new URL('../../benchmarks/evidence/', import.meta.url)
  * rather than silently weakening the evidence set. A bundle with no evidence
  * directory yields an empty snapshot, which excludes every high-risk review and
  * audit instead of admitting an unmeasured route.
+ *
+ * @param directory - the evidence directory to read; defaults to the one this
+ *   package ships (`benchmarks/evidence/`), which the archive carries because
+ *   `scripts/` and `benchmarks/` are both in the manifest's `files`.
  */
-function loadBenchmarks(): BenchmarkSnapshot {
+export function loadBenchmarks(directory: URL = EVIDENCE_DIR): BenchmarkSnapshot {
   let files: string[]
   try {
-    files = readdirSync(fileURLToPath(EVIDENCE_DIR)).filter(file => file.endsWith('.json')).sort()
+    files = readdirSync(fileURLToPath(directory)).filter(file => file.endsWith('.json')).sort()
   } catch {
     return { id: 'orc-evidence:none', suiteRevision: BENCHMARK_SUITE_REVISION, records: [] }
   }
   const records: BenchmarkEvidence[] = []
   for (const file of files) {
-    const path = fileURLToPath(new URL(file, EVIDENCE_DIR))
+    const path = fileURLToPath(new URL(file, directory))
     let parsed: unknown
     try {
       parsed = JSON.parse(readFileSync(path, 'utf8'))

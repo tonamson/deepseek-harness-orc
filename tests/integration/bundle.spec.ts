@@ -76,11 +76,14 @@ describe('one-package DSH bundle archive', () => {
     expect(paths).toContain('README.md')
     expect(paths).toContain('benchmarks/manifest.json')
     expect(paths).toContain('benchmarks/fixtures.json')
+    // The evidence runner is the only way an installed user can produce the
+    // records high-risk review and audit require, so it must be in the archive.
+    expect(paths).toContain('scripts/benchmark.mjs')
     expect(paths).toContain('package.json')
 
     // The archive extraction agrees: every asserted file is real content, and a
     // missing README cannot pass silently.
-    for (const path of ['cordis.patch.yml', 'lib/host/index.js', 'lib/client.js', 'lib/client/locales.js', 'README.md']) {
+    for (const path of ['cordis.patch.yml', 'lib/host/index.js', 'lib/client.js', 'lib/client/locales.js', 'README.md', 'scripts/benchmark.mjs']) {
       expect(existsSync(join(tree, path)), `missing archived ${path}`).toBe(true)
     }
   })
