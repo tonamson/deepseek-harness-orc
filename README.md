@@ -188,9 +188,10 @@ node scripts/clean-profile-smoke.mjs "0.1.6-alpha.2"
 ```
 
 The smoke script packs the bundle, installs it into a disposable Web profile
-through `dsh plugin`, exercises enable/disable/remove, and drives the complete
-ORC workflow with keyless fake inputs. It never starts a server and never calls
-a model provider.
+through `dsh plugin`, boots that profile headlessly (ephemeral port, no browser)
+to drive the real Plugin Manager enable/disable operations and their
+restart-required reporting, exercises removal, and drives the complete ORC
+workflow with keyless fake inputs. It never calls a model provider.
 
 ## Publishing
 

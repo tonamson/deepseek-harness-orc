@@ -6,8 +6,9 @@
  * tarball into a disposable profile's `node_modules`, and mounts the extracted
  * `lib/host/index.js` and `lib/client.js` artifacts exactly as a profile would.
  *
- * The profile model mirrors the persisted operations `@deepseek-ai/dsh-plugin-manager`
- * performs through `dsh plugin`/the Plugins page:
+ * The profile model **mirrors** the persisted operations
+ * `@deepseek-ai/dsh-plugin-manager` performs through `dsh plugin`/the Plugins
+ * page:
  *
  * - `installBundle` adds the dependency and selects the bundle layer
  *   (`PluginManager.installBundle` → `selectBundle(name, true)`);
@@ -15,6 +16,17 @@
  *   (`PluginManager.setBundleEnabled` → `selectBundle`);
  * - `removeBundle` deletes the installed dependency and its selection
  *   (`PluginManager.removeBundle`).
+ *
+ * It is a mirror, not the operation: it writes the same bytes and recomposes a
+ * live runtime, but it cannot reach the service's guards (`not-bundle`,
+ * `management-required`), its install/removal refusals, or its
+ * `restart-required` reporting, all of which need the `pluginManager` service
+ * inside a booted profile. Those are exercised for real by
+ * `scripts/clean-profile-smoke.mjs`, which boots the disposable Web profile
+ * through `@deepseek-ai/dsh/profile-boot` and calls the service. This harness
+ * stays the test-side mirror so the contribution transitions and the
+ * DSH-owned-defaults comparisons run in-process; do not read it as proof of the
+ * service contract.
  *
  * DSH owns the harness home's standard preset, global model defaults, provider
  * credentials, and unrelated settings; none of the three operations touches
@@ -495,6 +507,13 @@ export class ProfileRuntime {
  * The persisted profile operations Task 10 exercises, mirroring the Plugin
  * Manager's `installBundle`/`setBundleEnabled`/`removeBundle` file effects and
  * applying them to a live {@link ProfileRuntime}.
+ *
+ * **Mirror, not the service.** These methods write the same persisted bytes the
+ * real operations write and recompose a live runtime from them. They do not
+ * call the Plugin Manager and cannot observe its guards
+ * (`not-bundle`/`management-required`) or its `restart-required` reporting;
+ * `scripts/clean-profile-smoke.mjs` boots the profile and calls the real
+ * `pluginManager` service for that surface.
  */
 export class ProfileManager {
   constructor(
@@ -522,7 +541,12 @@ export class ProfileManager {
     await this.apply()
   }
 
-  /** Select or unselect the installed bundle layer without removing it. */
+  /**
+   * Select or unselect the installed bundle layer without removing it.
+   *
+   * Mirror of `PluginManager.setBundleEnabled` → `selectBundle`; the real
+   * service is exercised by `scripts/clean-profile-smoke.mjs`.
+   */
   async setBundleEnabled(name: string, enabled: boolean): Promise<void> {
     const manifest = readManifest(this.profile)
     const bundles = manifest.dsh?.profile?.bundles ?? []

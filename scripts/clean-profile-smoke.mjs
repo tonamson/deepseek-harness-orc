@@ -10,18 +10,26 @@
  * 3. installs the tarball through the documented
  *    `dsh plugin --profile web add file:<absolute path>` path;
  * 4. inspects the **installed** package archive, never the source tree;
- * 5. exercises enable/disable/remove and recomposes the profile with
- *    `dsh --profile web --dump-config` after each action, comparing the
- *    standard preset, global model defaults, provider credentials, and the
+ * 5. boots that profile headlessly through DSH's own public
+ *    `@deepseek-ai/dsh/profile-boot` entry and exercises the real Plugin
+ *    Manager `setBundleEnabled` operations, its `not-bundle` /
+ *    `management-required` guards, and its restart-required reporting, then
+ *    recomposes the profile with `dsh --profile web --dump-config`, comparing
+ *    the standard preset, global model defaults, provider credentials, and the
  *    unrelated rows byte-for-byte;
- * 6. drives the complete ORC workflow through the installed service with fake
+ * 6. removes the bundle through the real `dsh plugin` command and lets that
+ *    command's own reconciliation drop the selection;
+ * 7. drives the complete ORC workflow through the installed service with fake
  *    provider/CLI inputs and keyless recorded reports;
- * 7. removes only the directory it created, in a `finally` block.
+ * 8. removes only the directory it created, in a `finally` block.
  *
- * The profile is composed by the real DSH CLI; the run never boots a Web server
- * and never calls a model provider. It fails loudly with an actionable message
- * when the CLI, the packed archive, or the install path is unavailable — it
- * never reports success for a step it could not run.
+ * `dsh plugin` forwards its arguments to pnpm, so `enable`/`disable` exist only
+ * as the `pluginManager` service inside a booted profile. This run therefore
+ * boots the disposable Web profile with `--no-open --port 0` (an ephemeral port
+ * and no browser), calls the service, and disposes the profile again. It never
+ * calls a model provider. It fails loudly with an actionable message when the
+ * CLI, the packed archive, the boot entry, or the install path is unavailable —
+ * it never reports success for a step it could not run.
  */
 
 import { execFileSync } from 'node:child_process'
@@ -44,6 +52,10 @@ const BUNDLE_ROWS = ['orc-host', 'orc-remote-host']
 const NOW = '2026-09-23T00:00:00Z'
 /** The benchmark suite revision the shipped fixture manifest records. */
 const SUITE_REVISION = 'orc-review-v1'
+/** The inner arguments the headless profile boot runs with: ephemeral port, no browser. */
+const BOOT_ARGS = ['--no-open', '--port', '0']
+/** The banner a booted Web profile prints; suppressed so the smoke output stays clean. */
+const WEB_BANNER = 'dsh web: '
 
 const DSH_BIN = join(ROOT, 'node_modules', '.bin', 'dsh')
 
@@ -73,31 +85,206 @@ function readManifest(profileDir) {
   return JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8'))
 }
 
-function writeManifest(profileDir, manifest) {
-  writeFileSync(join(profileDir, 'package.json'), `${JSON.stringify(manifest, null, 2)}\n`)
-}
-
 /** Every profile bundle name currently selected. */
 function selectedBundles(profileDir) {
   return readManifest(profileDir).dsh?.profile?.bundles ?? []
 }
 
 /**
- * Persist one bundle's enablement, the field the Plugin Manager writes.
+ * The ORC rows the booted profile actually mounted.
  *
- * The Plugin Manager service is only reachable inside a booted profile, and
- * this smoke run must not start a server, so enable/disable persist the same
- * `dsh.profile.bundles` selection its `selectBundle` writes. Installation and
- * removal still go through the real `dsh plugin` command.
+ * A row whose entry has no fiber is declared but not live, which is exactly the
+ * difference a persisted `dsh.profile.bundles` write cannot show.
  */
-function selectBundle(profileDir, name, enabled) {
-  const manifest = readManifest(profileDir)
-  const previous = manifest.dsh?.profile?.bundles ?? []
-  const bundles = enabled
-    ? [...new Set([...previous, name])]
-    : previous.filter(bundle => bundle !== name)
-  manifest.dsh = { ...manifest.dsh, profile: { ...manifest.dsh?.profile, bundles } }
-  writeManifest(profileDir, manifest)
+function liveOrcRows(ctx) {
+  return [...ctx.loader.entries()]
+    .filter(entry => BUNDLE_ROWS.includes(String(entry.options.id)) && entry.fiber !== undefined)
+    .map(entry => String(entry.options.id))
+}
+
+/** Assert one Plugin Manager operation applied in place. */
+function assertApplied(label, result) {
+  const detail = result.error === undefined ? '' : ` (${result.error.code})`
+  if (result.application !== 'applied') fail(`${label} reported ${result.application}${detail}, not applied`)
+  if (result.changed !== true) fail(`${label} reported changed=${String(result.changed)}`)
+}
+
+/** Assert one Plugin Manager operation was refused with the expected guard code. */
+function assertRefused(label, result, code) {
+  const detail = result.error === undefined ? 'no error code' : result.error.code
+  if (result.application !== 'failed' || detail !== code) {
+    fail(`${label} reported ${result.application}/${detail}, not failed/${code}`)
+  }
+}
+
+/**
+ * Suppress only the booted Web server's own `dsh web: <url>` banner.
+ *
+ * Every other byte still reaches stdout, so a real diagnostic is never hidden.
+ *
+ * @returns a restore function that flushes any buffered partial line.
+ */
+function muteWebBanner() {
+  const original = process.stdout.write.bind(process.stdout)
+  let pending = ''
+  process.stdout.write = (chunk) => {
+    pending += String(chunk)
+    const lines = pending.split('\n')
+    pending = lines.pop() ?? ''
+    for (const line of lines) {
+      if (!line.startsWith(WEB_BANNER)) original(`${line}\n`)
+    }
+    return true
+  }
+  return () => {
+    process.stdout.write = original
+    if (pending !== '') original(pending)
+  }
+}
+
+/**
+ * Boot the disposable Web profile headlessly through DSH's public profile-boot
+ * entry, exactly as `dsh --profile web --patch <file> --no-open --port 0` would.
+ *
+ * @param patchFiles absolute `--patch` overlay paths, in order.
+ * @returns the booted root context and its shutdown controller.
+ */
+async function bootProfile(patchFiles) {
+  let modules
+  try {
+    modules = await Promise.all([
+      import('@deepseek-ai/dsh/profile-boot'),
+      import('@deepseek-ai/dsh-launch-environment'),
+    ])
+  } catch (error) {
+    return fail(`the pinned @deepseek-ai/dsh profile-boot path is unavailable: ${String(error?.message ?? error)}`)
+  }
+  const [boot, launch] = modules
+  const environment = launch.createLaunchEnvironmentSnapshot([{ source: 'process', values: process.env }])
+  return boot.runProfile({ environment, profile: 'web', patchFiles, args: BOOT_ARGS })
+}
+
+/**
+ * Drive the real Plugin Manager enable/disable operations against the
+ * disposable Web profile.
+ *
+ * `dsh plugin` forwards its arguments to pnpm, so enable and disable exist only
+ * as the `pluginManager` service inside a booted profile. This leg boots the
+ * profile three times — the normal composition, a composition whose `hmr` row is
+ * disabled so the manager must report `restart-required`, and the controlled
+ * restart that applies the persisted change — and asserts the real service's
+ * results, its guards, and the live runtime contributions.
+ *
+ * @param options the owned temp root, the disposable harness home, the profile
+ *   directory, and the composition/snapshot readers owned by the caller.
+ * @returns the stable DSH-owned baseline taken after the first boot, for the
+ *   caller's later removal comparison.
+ */
+async function exercisePluginManager({ ownedDir, home, profileDir, dumpConfig, snapshot }) {
+  const restoreBanner = muteWebBanner()
+  // The in-process boot resolves `$DSH_HOME` from `process.env` at call time, so
+  // it must be scoped here: without this the boot would load the developer's own
+  // profile instead of the disposable one.
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  const managerOf = (ctx, label) => {
+    const manager = ctx.get('pluginManager')
+    if (manager === undefined) fail(`${label} exposed no pluginManager service`)
+    return manager
+  }
+  let baseline
+  try {
+    step('booting the profile and exercising the Plugin Manager enable/disable operations')
+    const applied = await bootProfile([])
+    try {
+      if (applied.ctx.get('orc') === undefined) fail('the booted profile did not activate the ORC service')
+      if (liveOrcRows(applied.ctx).length !== BUNDLE_ROWS.length) {
+        fail(`the booted profile mounted ${liveOrcRows(applied.ctx).length} of ${BUNDLE_ROWS.length} ORC rows`)
+      }
+      const manager = managerOf(applied.ctx, 'the booted profile')
+      const listed = (await manager.listBundles()).find(bundle => bundle.name === PACKAGE_NAME)
+      if (listed === undefined) fail('the Plugin Manager does not list the installed bundle')
+      if (listed.error !== undefined) fail(`the Plugin Manager reports the bundle as ${listed.error.code}`)
+      if (!listed.enabled || !listed.installed || !listed.removable) {
+        fail(`the Plugin Manager reports the bundle enabled=${listed.enabled} installed=${listed.installed} removable=${listed.removable}`)
+      }
+      const rowIds = (listed.rows ?? []).map(row => row.rowId)
+      if (rowIds.length !== BUNDLE_ROWS.length || !BUNDLE_ROWS.every(row => rowIds.includes(row))) {
+        fail(`the Plugin Manager reports rows ${rowIds.join(', ')}, not ${BUNDLE_ROWS.join(', ')}`)
+      }
+
+      // The DSH-owned baseline is taken here, after the first boot. A booted Web
+      // profile mints its own `client-connection/browser-session` grant into
+      // `.credentials.yaml` (DSH's credentials-local provider, not this bundle),
+      // so the raw credential bytes legitimately move once on the first boot and
+      // are stable from then on. Every ORC action below is compared against this
+      // baseline, and the caller reuses it after removal.
+      baseline = snapshot()
+
+      assertApplied('Plugin Manager setBundleEnabled(false)', await manager.setBundleEnabled(PACKAGE_NAME, false))
+      if (applied.ctx.get('orc') !== undefined) fail('disabling through the Plugin Manager left the ORC service mounted')
+      if (liveOrcRows(applied.ctx).length !== 0) fail('disabling through the Plugin Manager left ORC rows mounted')
+      if (selectedBundles(profileDir).includes(PACKAGE_NAME)) fail('the Plugin Manager did not persist the disable')
+      if (orcRows(dumpConfig()).length !== 0) fail('the Plugin Manager disable left ORC rows in the composed profile')
+      assertDefaultsUnchanged('Plugin Manager disable', snapshot(), baseline)
+
+      assertApplied('Plugin Manager setBundleEnabled(true)', await manager.setBundleEnabled(PACKAGE_NAME, true))
+      if (applied.ctx.get('orc') === undefined) fail('re-enabling through the Plugin Manager did not mount the ORC service')
+      if (liveOrcRows(applied.ctx).length !== BUNDLE_ROWS.length) fail('re-enabling through the Plugin Manager did not remount every ORC row')
+      if (!selectedBundles(profileDir).includes(PACKAGE_NAME)) fail('the Plugin Manager did not persist the enable')
+      if (orcRows(dumpConfig()).length !== BUNDLE_ROWS.length) fail('the Plugin Manager enable left ORC rows out of the composed profile')
+      assertDefaultsUnchanged('Plugin Manager enable', snapshot(), baseline)
+
+      // The service's own guards, which a file-level mirror cannot reach.
+      assertRefused('setBundleEnabled on a package with no bundle patch', await manager.setBundleEnabled('zod', true), 'not-bundle')
+      assertRefused('setBundleEnabled on a manager-owned bundle', await manager.setBundleEnabled('@deepseek-ai/dsh-base', false), 'management-required')
+      if (!selectedBundles(profileDir).includes(PACKAGE_NAME)) fail('a refused Plugin Manager operation changed the selection')
+    } finally {
+      await applied.shutdown.shutdown(0)
+    }
+
+    step('verifying the Plugin Manager restart requirement and a controlled profile restart')
+    const noHmr = join(ownedDir, 'no-hmr.patch.yml')
+    writeFileSync(noHmr, [
+      '# The smoke overlay removes the live-reload row, so the Plugin Manager must',
+      '# report its restart requirement instead of applying the change in place.',
+      '- id: hmr',
+      '  disabled: true',
+      '',
+    ].join('\n'))
+    const restarting = await bootProfile([noHmr])
+    try {
+      if (restarting.ctx.get('hmr') !== undefined) fail('the no-HMR overlay did not remove the hmr service')
+      const manager = managerOf(restarting.ctx, 'the no-HMR boot')
+      const required = await manager.setBundleEnabled(PACKAGE_NAME, false)
+      if (required.application !== 'restart-required') {
+        fail(`disabling without live reload reported ${required.application}, not restart-required`)
+      }
+      if (required.changed !== true) fail(`the restart-required disable reported changed=${String(required.changed)}`)
+      if (selectedBundles(profileDir).includes(PACKAGE_NAME)) fail('the restart-required disable was not persisted')
+    } finally {
+      await restarting.shutdown.shutdown(0)
+    }
+
+    const restarted = await bootProfile([])
+    try {
+      if (restarted.ctx.get('orc') !== undefined) fail('the controlled restart still mounted the disabled ORC service')
+      if (liveOrcRows(restarted.ctx).length !== 0) fail('the controlled restart still mounted the disabled ORC rows')
+      const manager = managerOf(restarted.ctx, 'the restarted profile')
+      assertApplied('Plugin Manager setBundleEnabled(true) after the restart', await manager.setBundleEnabled(PACKAGE_NAME, true))
+      if (restarted.ctx.get('orc') === undefined) fail('re-enabling after the restart did not mount the ORC service')
+      if (liveOrcRows(restarted.ctx).length !== BUNDLE_ROWS.length) fail('re-enabling after the restart did not remount every ORC row')
+      if (!selectedBundles(profileDir).includes(PACKAGE_NAME)) fail('re-enabling after the restart was not persisted')
+      assertDefaultsUnchanged('the booted profile', snapshot(), baseline)
+    } finally {
+      await restarted.shutdown.shutdown(0)
+    }
+  } finally {
+    restoreBanner()
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  }
+  return baseline
 }
 
 /** Remove the ORC layer from one composed profile dump. */
@@ -374,7 +561,8 @@ async function main() {
 
     // Seed the DSH-owned configuration the bundle must never modify: the user
     // patch layer carries the global model default, and the credentials file is
-    // a valid empty document (no real credential).
+    // a valid empty document (no real credential). The credentials file must be
+    // owner-only: a booted profile refuses a store readable beyond its owner.
     writeFileSync(join(profileDir, 'cordis.patch.yml'), [
       '# user layer: global model default and standard preset override',
       '- id: agent-default-model',
@@ -383,7 +571,7 @@ async function main() {
       '    model: deepseek-flash',
       '',
     ].join('\n'))
-    writeFileSync(join(home, '.credentials.yaml'), 'version: 1\nrefs: {}\nrecords: {}\n')
+    writeFileSync(join(home, '.credentials.yaml'), 'version: 1\nrefs: {}\nrecords: {}\n', { mode: 0o600 })
 
     const snapshot = () => ({
       patchLayer: readFileSync(join(profileDir, 'cordis.patch.yml'), 'utf8'),
@@ -436,16 +624,11 @@ async function main() {
     if (enabledRows.length !== BUNDLE_ROWS.length) fail(`activation composed ${enabledRows.length} of ${BUNDLE_ROWS.length} ORC rows`)
     assertDefaultsUnchanged('install', snapshot(), before)
 
-    step('disabling the bundle')
-    selectBundle(profileDir, PACKAGE_NAME, false)
-    const disabledDump = dumpConfig()
-    if (orcRows(disabledDump).length !== 0) fail('disabling left ORC rows in the composed profile')
-    assertDefaultsUnchanged('disable', snapshot(), before)
-
-    step('re-enabling the bundle')
-    selectBundle(profileDir, PACKAGE_NAME, true)
-    if (orcRows(dumpConfig()).length !== BUNDLE_ROWS.length) fail('re-enabling did not restore the ORC rows')
-    assertDefaultsUnchanged('enable', snapshot(), before)
+    // The real enable/disable/restart surface: the Plugin Manager service inside
+    // a booted profile. Every persisted-selection assertion below is the
+    // service's own write, never a hand-edit of `dsh.profile.bundles`. The
+    // returned baseline is the post-first-boot DSH-owned configuration.
+    const booted = await exercisePluginManager({ ownedDir: owned, home, profileDir, dumpConfig, snapshot })
 
     step('driving the complete ORC workflow through the installed service')
     const require = createRequire(join(installedDir, 'package.json'))
@@ -456,15 +639,23 @@ async function main() {
     step(`workflow completed at phase ${completed.phase}`)
 
     step('removing the bundle')
-    selectBundle(profileDir, PACKAGE_NAME, false)
+    // The bundle is selected here on purpose: `dsh plugin remove` runs pnpm and
+    // then reconciles the selection itself (a removed dependency whose bundle
+    // metadata is gone is dropped from `dsh.profile.bundles`). Clearing the
+    // selection first would satisfy the assertion below by hand and hide exactly
+    // the behaviour it claims to check. The precondition is asserted so a later
+    // refactor cannot quietly make the check vacuous again.
+    if (!selectedBundles(profileDir).includes(PACKAGE_NAME)) {
+      fail('the bundle was not selected before removal; the reconciliation assertion would be vacuous')
+    }
     execFileSync(DSH_BIN, ['plugin', '--profile', 'web', 'remove', PACKAGE_NAME], { cwd: ROOT, env, stdio: 'pipe' })
     const removedManifest = readManifest(profileDir)
     if (removedManifest.dependencies?.[PACKAGE_NAME] !== undefined) fail('removal left the bundle dependency in the profile')
     if (selectedBundles(profileDir).includes(PACKAGE_NAME)) fail('removal left the bundle selected')
     if (orcRows(dumpConfig()).length !== 0) fail('removal left ORC rows in the composed profile')
-    assertDefaultsUnchanged('remove', snapshot(), before)
+    assertDefaultsUnchanged('remove', snapshot(), booted)
 
-    step(`PASS: ${PACKAGE_NAME} on DSH ${version} (install, enable, disable, remove, full workflow)`)
+    step(`PASS: ${PACKAGE_NAME} on DSH ${version} (install, Plugin Manager enable/disable/restart, remove, full workflow)`)
   } finally {
     rmSync(owned, { recursive: true, force: true })
   }

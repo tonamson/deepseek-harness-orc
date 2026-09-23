@@ -404,9 +404,10 @@ exactly what Step 3a's stated proof requires.
 Status: **PASS** on the single supported version. The gate is
 `tests/integration/bundle.spec.ts` (archive contract),
 `tests/integration/compatibility.spec.ts` (support set and extension
-contracts), `tests/integration/disabled.spec.ts` (profile lifecycle), and
-`scripts/clean-profile-smoke.mjs` (clean-profile installation), driven by
-`.github/workflows/ci.yml`.
+contracts), `tests/integration/disabled.spec.ts` (profile lifecycle against the
+packed archive), and `scripts/clean-profile-smoke.mjs` (clean-profile
+installation and the real Plugin Manager enable/disable/restart operations),
+driven by `.github/workflows/ci.yml`.
 
 ### Supported set and CI matrix
 
@@ -424,7 +425,7 @@ The gate ran with:
 
 | Item | Version |
 |---|---|
-| `@deepseek-ai/dsh` (CLI used by the smoke harness) | `0.1.6-alpha.2` |
+| `@deepseek-ai/dsh` (CLI and `./profile-boot` entry used by the smoke harness) | `0.1.6-alpha.2` |
 | `@deepseek-ai/dsh-settings`, `dsh-tools`, `dsh-llm`, `dsh-session`, `dsh-subagent`, `dsh-subprocess`, `dsh-typert-protocol`, `dsh-system-prompt`, `dsh-client-ui-settings` | `0.1.6-alpha.2` |
 | `@deepseek-ai/cordis` | `4.0.4` |
 | `@deepseek-ai/schemastery` | `3.18.4` |
@@ -450,6 +451,7 @@ removes or reshapes one fails before it can ship:
 | `ctx.subagents.startContinuable` | `startContinuable(spec: ContinuableStartSpec): Promise<ContinuableStart>` |
 | `ctx.subprocess.spawn` | `spawn(spec: SubprocessSpawnSpec): SubprocessHandle` |
 | Typert host seams | `export declare abstract class TypertRemoteService` and `export declare function Remote` |
+| Profile-boot entry the smoke boots through | `@deepseek-ai/dsh` export `./profile-boot` → `runProfile(options: RunProfileOptions)` with `profile`, `patchFiles`, and `args`, plus `createLaunchEnvironmentSnapshot` from `@deepseek-ai/dsh-launch-environment` |
 
 `./typert` and `./remote` stay undeclared: the published generator cannot build
 them for this external package, and the loader fails loud on a declared-but-
@@ -478,18 +480,65 @@ The `README.md` assertion is load-bearing: it is listed in `package.json`
 - inspected the **installed** archive (manifest, patch rows, Host JS, lazy-CJS
   Client JS, locale strings, README, benchmark fixture manifest);
 - composed the profile with `dsh --profile web --dump-config` and confirmed both
-  ORC rows appear on enable, disappear on disable, reappear on re-enable, and
-  disappear after removal, while the non-ORC composed rows stay byte-identical;
-- confirmed the seeded user patch layer (global model default) and the
-  credentials document are byte-identical before and after every action;
+  ORC rows appear after install, disappear after a Plugin Manager disable,
+  reappear after a Plugin Manager enable, and disappear after removal, while the
+  non-ORC composed rows stay byte-identical;
+- confirmed the seeded user patch layer (global model default) is byte-identical
+  before install and after removal, and the credentials document is
+  byte-identical across install and across every Plugin Manager action and
+  removal (see the baseline note below);
 - drove spec → plan → Lead/Peer → task settle → review (medium finding blocks
   completion) → fix → review → audit → final branch review and audit →
   `completed` through the installed `OrcService` with keyless fake ports;
-- removed the bundle and confirmed the dependency and selection are gone.
+- removed the bundle and confirmed the dependency is gone **and that the
+  removal command's own reconciliation dropped the selection**, with no
+  hand-edit of `dsh.profile.bundles` anywhere in the run.
 
-The smoke never boots a Web server and never calls a model provider. It fails
-loudly with an actionable message when the CLI, the archive, or the install path
-is unavailable; it never reports success for a step it could not run.
+### Real Plugin Manager operations (enable, disable, restart requirement)
+
+`dsh plugin` forwards its arguments straight to pnpm (`runPlugin` →
+`runPluginCommand` → `runProfilePnpm`), so `enable` and `disable` have no CLI
+surface: they exist only as the `pluginManager` service inside a booted profile.
+The smoke therefore boots the disposable Web profile headlessly through DSH's
+public `@deepseek-ai/dsh/profile-boot` entry with `--no-open --port 0` (an
+ephemeral port and no browser), calls the service, and disposes the profile
+again. Three boots are used:
+
+1. the normal composition, where `hmr` is live: `setBundleEnabled(false)` and
+   `setBundleEnabled(true)` must report `application: "applied"` and
+   `changed: true`, must persist `dsh.profile.bundles`, and must mount/unmount
+   the `orc-host` and `orc-remote-host` loader rows and the `orc` service for
+   real. The same boot asserts the service's guards:
+   `setBundleEnabled('zod', true)` must be refused with `not-bundle` and
+   `setBundleEnabled('@deepseek-ai/dsh-base', false)` with `management-required`,
+   neither of which may change the selection;
+2. a composition booted with a `- id: hmr / disabled: true` overlay, so the
+   manager must report `application: "restart-required"` and still persist the
+   disable;
+3. the controlled restart of the normal composition, which must come up with no
+   ORC row and no `orc` service, after which a Plugin Manager enable must apply
+   and remount them.
+
+`tests/integration/profile-harness.ts` keeps its `ProfileManager` as the
+**test-side mirror** of the persisted writes: it writes the same bytes and
+recomposes a live in-process runtime, so the contribution transitions and the
+DSH-owned-defaults comparisons can run in vitest, but it does not call the
+service and cannot observe the guards or the restart requirement. The smoke's
+booted leg is the verification for those; the mirror's own doc comment says so,
+so it is not mistaken for the real operation.
+
+The smoke never calls a model provider. It fails loudly with an actionable
+message when the CLI, the archive, the boot entry, or the install path is
+unavailable; it never reports success for a step it could not run.
+
+**DSH-owned baseline note.** A booted Web profile mints its own
+`client-connection/browser-session` grant into `$DSH_HOME/.credentials.yaml`
+(DSH's `credentials-local` provider, not this bundle), so the raw credential
+bytes legitimately move once on the first boot and are stable afterwards. The
+smoke's DSH-owned baseline for the booted leg — and for the later removal
+comparison — is therefore taken immediately after the first boot settles, and
+every ORC action is compared against it byte-for-byte. The install comparison
+still runs from the pre-install baseline, before any boot.
 
 ### Lifecycle note: disable ordering
 

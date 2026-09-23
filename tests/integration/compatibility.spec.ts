@@ -122,6 +122,24 @@ describe('extension contracts the bundle depends on', () => {
     expect(typert).toContain('export declare function Remote')
   })
 
+  it('reads the profile-boot entry the smoke harness boots the Web profile through', () => {
+    // `scripts/clean-profile-smoke.mjs` reaches the real Plugin Manager
+    // enable/disable operations by booting the disposable profile through this
+    // public entry; a DSH upgrade that drops or reshapes it must fail here.
+    const dsh = JSON.parse(readFileSync(join(REPO_ROOT, 'node_modules', '@deepseek-ai', 'dsh', 'package.json'), 'utf8'))
+    expect(dsh.exports['./profile-boot']).toEqual({
+      types: './lib/types/profile-boot.d.ts',
+      default: './lib/profile-boot.js',
+    })
+    const boot = declaration('@deepseek-ai/dsh', 'profile-boot.d.ts')
+    expect(boot).toContain('export declare function runProfile(options: RunProfileOptions)')
+    expect(boot).toContain('profile: string;')
+    expect(boot).toContain('patchFiles: readonly string[];')
+    expect(boot).toContain('args: readonly string[];')
+    expect(declaration('@deepseek-ai/dsh-launch-environment', 'index.d.ts'))
+      .toContain('export declare function createLaunchEnvironmentSnapshot')
+  })
+
   it('declares no generated ./typert or ./remote artifact', () => {
     // The published generator cannot build these for an external package, and
     // the loader fails loud on a declared-but-broken artifact.
