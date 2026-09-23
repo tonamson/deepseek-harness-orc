@@ -15,6 +15,9 @@
  * - A successful test is advisory. A later authentication, network, quota, or
  *   empty response failure stays a task failure: the adapter never falls back
  *   to another provider, model, or backend.
+ * - Only a completed review is a result. A response that does not end in a
+ *   normal stop — truncated, tool-calling, errored, aborted, or unterminated —
+ *   is never returned as accepted text.
  */
 
 import {
@@ -100,17 +103,23 @@ export interface ProviderLlmPort {
  * The DSH vocabulary is wider than ORC's, so the closest bucket wins:
  * credential and authorization codes are `authentication`, quota and
  * rate-limit codes are `quota`, a degenerate empty response is `empty-result`,
- * and everything else — transport, timeout, server, cancellation, and unknown
- * codes — is the generic `network` bucket, because the six-code contract has no
- * separate service-failure code. An absent code (a non-error throw) lands
- * there too.
+ * an unknown model, a missing adapter, or a rejected reasoning effort is
+ * `model-unavailable`, and everything else — transport, timeout, server,
+ * cancellation, and unknown codes — is the generic `network` bucket, because
+ * the six-code contract has no separate service-failure code. An absent code
+ * (a non-error throw) lands there too.
  */
 function classifyFailure(code: string): ProviderErrorCode {
   const upper = code.toUpperCase()
   if (upper === 'EMPTY_RESPONSE') return 'empty-result'
   if (upper.includes('QUOTA') || upper.includes('RATE_LIMIT') || upper.includes('BALANCE') || upper.includes('BILLING') || upper.includes('CREDIT')) return 'quota'
   if (upper.includes('AUTH') || upper.includes('CREDENTIAL') || upper.includes('UNAUTHORIZED') || upper.includes('FORBIDDEN') || upper.includes('API_KEY')) return 'authentication'
-  if (upper.includes('MODEL_NOT_FOUND') || upper.includes('MODEL_UNAVAILABLE') || upper.includes('NO_ADAPTER')) return 'model-unavailable'
+  if (
+    upper.includes('MODEL_NOT_FOUND')
+    || upper.includes('MODEL_UNAVAILABLE')
+    || upper.includes('NO_ADAPTER')
+    || upper.includes('UNSUPPORTED_REASONING_EFFORT')
+  ) return 'model-unavailable'
   return 'network'
 }
 
@@ -155,6 +164,16 @@ export class ProviderAdapter {
    * A live adapter catalog is not an official capability/pricing source and
    * exposes no backend version, so both evidence fields are recorded empty —
    * the observation must not masquerade as a sourced vendor claim.
+   *
+   * `accountAccess` is recorded `false` for every entry because this read
+   * carries no verified account-access signal: `listProviders()` only reports
+   * that DSH registered an adapter, and DSH documents catalog membership as
+   * advisory. `false` therefore means **unverified**, not known-denied — the
+   * field is a boolean, so the fail-closed encoding of "no evidence" is to
+   * withhold the claim. The only verified access evidence ORC has is a green
+   * {@link test} result, so Task 7's Auto eligibility must require a green
+   * `ConnectionResult` bound to this exact `routeKey` and revision; catalog
+   * membership alone never admits a route.
    */
   async catalog(provider: string): Promise<CatalogSnapshot> {
     const observedAt = new Date().toISOString()
@@ -169,7 +188,9 @@ export class ProviderAdapter {
             backendVersion: '',
             model: model.id,
             efforts: [...efforts],
-            accountAccess: true,
+            // Unverified: no account-access signal exists in this read. See the
+            // method contract above and Task 7's green-test gate.
+            accountAccess: false,
             sourceUrl: '',
             retrievedAt: observedAt,
           })
@@ -202,6 +223,13 @@ export class ProviderAdapter {
    * Rejects when the supplied test result is not bound to this exact route and
    * revision (a stale green result), when it did not pass, and on any dispatch
    * failure. A failure here remains a task failure — there is no fallback.
+   *
+   * Every dispatch failure is sanitized exactly as {@link test} sanitizes its
+   * own: DSH's `listModels` and `resolveModelInfo` await the provider adapter's
+   * discovery without normalizing it, so a raw adapter error (network, auth, an
+   * HTTP body) would otherwise escape `run` verbatim. Only an ORC-owned
+   * {@link ProviderError} — whose message is a fixed ORC string — passes through
+   * unchanged; anything else is reduced to a safe code.
    */
   async run(
     route: ProviderRoute,
@@ -218,7 +246,12 @@ export class ProviderAdapter {
       )
     }
     if (!test.ok) throw new ProviderError(test.code, `connection test failed: ${test.code}`)
-    return this.dispatch(route, prompt, signal)
+    try {
+      return await this.dispatch(route, prompt, signal)
+    } catch (error) {
+      if (error instanceof ProviderError) throw error
+      throw dispatchFailure(safeCode(error))
+    }
   }
 
   /** Check the live catalog, build the request, check again, then stream. */
@@ -237,7 +270,19 @@ export class ProviderAdapter {
     })
   }
 
-  /** Refuse a route the live DSH adapter catalog does not currently serve. */
+  /**
+   * Refuse a route the live DSH adapter catalog does not currently serve.
+   *
+   * Registration and model membership are not enough: `effort` is part of the
+   * route identity (it is in the `routeKey`, and a test is invalidated when it
+   * changes), so an effort the adapter does not advertise must be refused here
+   * rather than dispatched for DSH to reject as `UNSUPPORTED_REASONING_EFFORT`.
+   * Resolution failure is sanitized: a model the adapter cannot describe is
+   * `model-unavailable`, while a discovery transport/auth failure keeps its own
+   * classification. Because {@link dispatch} runs this check before the request
+   * is assembled and again immediately before dispatch, both checks validate
+   * the effort.
+   */
   private async checkRoute(route: ProviderRoute): Promise<void> {
     if (!this.llm.listProviders().some(entry => entry.id === route.provider)) {
       throw new ProviderError('route-mismatch', `provider "${route.provider}" is not registered with DSH`)
@@ -245,6 +290,19 @@ export class ProviderAdapter {
     const models = await this.llm.listModels(route.provider)
     if (!models.some(model => model.id === route.model)) {
       throw new ProviderError('model-unavailable', `model "${route.model}" is not available on provider "${route.provider}"`)
+    }
+    let resolved: LlmResolvedModelInfo
+    try {
+      resolved = await this.llm.resolveModelInfo(route.provider, route.model)
+    } catch (error) {
+      throw dispatchFailure(safeCode(error))
+    }
+    const efforts: string[] = (resolved.reasoning?.efforts ?? []).map(effort => effort.id)
+    if (!efforts.includes(route.effort)) {
+      throw new ProviderError(
+        'model-unavailable',
+        `reasoning effort "${route.effort}" is not advertised for provider "${route.provider}" model "${route.model}"`,
+      )
     }
   }
 
@@ -258,23 +316,39 @@ export class ProviderAdapter {
     }
   }
 
-  /** Assemble the accepted final text, or fail on a stream error or empty result. */
+  /**
+   * Assemble the accepted final text, or fail on a stream error, an incomplete
+   * response, or an empty result.
+   *
+   * Only a terminal normal `stop` finish is an accepted result. Any other
+   * finish — `max-tokens` (reachable in normal operation because DSH
+   * materializes an adapter-configured `defaultMaxTokens`), `tool-calls`, a
+   * provider-specific reason, or no terminal finish at all — leaves partial
+   * text unaccepted and fails as `empty-result`: the six-code contract has no
+   * truncation bucket, and the result is not an accepted final result.
+   * `error` and `aborted` finishes keep their own classification.
+   */
   private async collect(options: GenerateOptions): Promise<string> {
     let text = ''
     let failureCode: string | undefined
+    let stopped = false
     try {
       for await (const chunk of this.llm.stream(options)) {
         if (chunk.type === 'text-delta') {
           text += chunk.text
-        } else if (chunk.type === 'finish' && (chunk.reason.kind === 'error' || chunk.reason.kind === 'aborted')) {
-          failureCode = chunk.reason.failure.code
+        } else if (chunk.type === 'finish') {
+          if (chunk.reason.kind === 'error' || chunk.reason.kind === 'aborted') {
+            failureCode = chunk.reason.failure.code
+          } else if (chunk.reason.kind === 'stop') {
+            stopped = true
+          }
         }
       }
     } catch (error) {
       failureCode = rawCode(error)
     }
     if (failureCode !== undefined) throw dispatchFailure(classifyFailure(failureCode))
-    if (text.length === 0) throw dispatchFailure('empty-result')
+    if (!stopped || text.length === 0) throw dispatchFailure('empty-result')
     return text
   }
 }

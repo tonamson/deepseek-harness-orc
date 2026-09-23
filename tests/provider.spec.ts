@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest'
-import { ProviderAdapter } from '../src/host/provider.js'
+import { ProviderAdapter, ProviderError } from '../src/host/provider.js'
 import { fakeLlm } from './fixtures/provider.js'
 
 const route = { kind: 'provider', provider: 'custom', model: 'm1', effort: 'high' } as const
@@ -34,10 +34,10 @@ it('maps a degenerate empty response to empty-result', async () => {
   await expect(new ProviderAdapter(llm).test(route, 'rev-1', new AbortController().signal))
     .resolves.toMatchObject({ ok: false, code: 'empty-result' })
 })
-it('checks the live catalog before the request and again before dispatch', async () => {
+it('checks the live catalog and the advertised effort before the request and again before dispatch', async () => {
   const llm = fakeLlm({ output: 'OK' })
   await new ProviderAdapter(llm).test(route, 'rev-1', new AbortController().signal)
-  expect(llm.reads).toEqual({ providers: 2, models: 2 })
+  expect(llm.reads).toEqual({ providers: 2, models: 2, resolves: 2 })
 })
 
 it('stamps a failing test with an ISO instant', async () => {
@@ -85,20 +85,101 @@ it('sends only the route reference and surfaces no credential', async () => {
   expect(Object.keys(llm.calls[0]).sort()).toEqual(['messages', 'model', 'provider', 'reasoningEffort', 'signal'])
   expect(JSON.stringify(result)).not.toMatch(/apiKey|token|secret|password/i)
 })
-it('catalogs the exact advertised routes without credentials', async () => {
-  const snapshot = await new ProviderAdapter(fakeLlm()).catalog('custom')
+
+// Important 1: a raw adapter discovery failure must never escape `run`.
+it('sanitizes a catalog lookup failure during a connection test', async () => {
+  const llm = fakeLlm({ failure: 'discovery' })
+  await expect(new ProviderAdapter(llm).test(route, 'rev-1', new AbortController().signal))
+    .resolves.toMatchObject({ ok: false, code: 'network' })
+})
+it('sanitizes a raw catalog lookup failure during dispatch instead of leaking it from run', async () => {
+  const llm = fakeLlm({ output: 'OK' })
+  const adapter = new ProviderAdapter(llm)
+  const green = await adapter.test(route, 'rev-1', new AbortController().signal)
+  expect(green.ok).toBe(true)
+  // The adapter's own discovery now throws a raw transport error, as DSH's
+  // listModels does when the provider adapter fails without normalization.
+  llm.fail('discovery')
+  const failure: unknown = await adapter.run(route, 'review', 'rev-1', green, new AbortController().signal)
+    .then(() => undefined, (error: unknown) => error)
+  expect(failure).toBeInstanceOf(ProviderError)
+  expect(failure).toMatchObject({ code: 'network', message: 'provider request failed: network' })
+  expect((failure as Error).message).not.toMatch(/fake provider discovery failed/)
+})
+
+// Important 2: only a normal stop finish is an accepted result.
+it.each(['max-tokens', 'tool-calls'] as const)(
+  'rejects a %s finish instead of accepting partial text',
+  async (finishReason) => {
+    const llm = fakeLlm({ output: 'partial review', finishReason })
+    await expect(new ProviderAdapter(llm).test(route, 'rev-1', new AbortController().signal))
+      .resolves.toMatchObject({ ok: false, code: 'empty-result' })
+  },
+)
+it('rejects a stream that ends without any terminal finish', async () => {
+  const llm = fakeLlm({ output: 'partial review', finishReason: 'none' })
+  await expect(new ProviderAdapter(llm).test(route, 'rev-1', new AbortController().signal))
+    .resolves.toMatchObject({ ok: false, code: 'empty-result' })
+})
+it('never returns partial text when a green route truncates during the run', async () => {
+  const llm = fakeLlm({ output: 'OK' })
+  const adapter = new ProviderAdapter(llm)
+  const green = await adapter.test(route, 'rev-1', new AbortController().signal)
+  llm.setFinishReason('max-tokens')
+  await expect(adapter.run(route, 'review', 'rev-1', green, new AbortController().signal))
+    .rejects.toThrow(/empty-result/)
+})
+
+// Important 3: catalog membership is not account-access evidence.
+it('records account access as unverified because catalog membership is advisory', async () => {
+  const adapter = new ProviderAdapter(fakeLlm())
+  const snapshot = await adapter.catalog('custom')
   expect(snapshot.entries).toEqual([{
     routeKey: 'provider:custom:m1:high',
     backendVersion: '',
     model: 'm1',
     efforts: ['high'],
-    accountAccess: true,
+    accountAccess: false,
     sourceUrl: '',
     retrievedAt: snapshot.observedAt,
   }])
   expect(snapshot.id).toBe(`custom@${snapshot.observedAt}`)
+  // The only verified access evidence is a green connection test bound to the
+  // exact catalog route key; Task 7 must gate Auto eligibility on it.
+  const green = await adapter.test(route, 'rev-1', new AbortController().signal)
+  expect(green).toMatchObject({ ok: true, routeKey: snapshot.entries[0].routeKey })
 })
 it('catalogs nothing for a provider DSH does not register', async () => {
   const snapshot = await new ProviderAdapter(fakeLlm()).catalog('other')
   expect(snapshot.entries).toEqual([])
+})
+
+// Important 4: the route check checks the effort, not just provider and model.
+it('rejects an unadvertised effort before the request with model-unavailable', async () => {
+  const llm = fakeLlm({ output: 'OK' })
+  const low = { kind: 'provider', provider: 'custom', model: 'm1', effort: 'low' } as const
+  await expect(new ProviderAdapter(llm).test(low, 'rev-1', new AbortController().signal))
+    .resolves.toMatchObject({ ok: false, code: 'model-unavailable' })
+  expect(llm.calls).toEqual([])
+})
+it('rejects a route whose effort stops being advertised before dispatch', async () => {
+  const llm = fakeLlm({ output: 'OK' })
+  const adapter = new ProviderAdapter(llm)
+  const green = await adapter.test(route, 'rev-1', new AbortController().signal)
+  expect(green.ok).toBe(true)
+  const dispatched = llm.calls.length
+  // Flip the advertised efforts only after the pre-request check resolved, so
+  // the rejection can only come from the pre-dispatch check.
+  llm.afterResolve = () => {
+    llm.afterResolve = undefined
+    llm.setEfforts(['low'])
+  }
+  await expect(adapter.run(route, 'review', 'rev-1', green, new AbortController().signal))
+    .rejects.toMatchObject({ code: 'model-unavailable' })
+  expect(llm.calls.length).toBe(dispatched)
+})
+it('classifies an effort DSH rejects at dispatch as model-unavailable', async () => {
+  const llm = fakeLlm({ failure: 'effort-rejected' })
+  await expect(new ProviderAdapter(llm).test(route, 'rev-1', new AbortController().signal))
+    .resolves.toMatchObject({ ok: false, code: 'model-unavailable' })
 })
