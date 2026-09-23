@@ -1,0 +1,33 @@
+# ORC release gate.
+#
+# R15: the published DSH support set is exactly `0.1.6-alpha.2` — the minimum and
+# the newest supported version are the same, because `0.1.7-alpha.2` removed the
+# `ctx.settings.installSection` / `ctx.settingsScope` extension points this
+# bundle's settings design requires. The matrix therefore has one entry, and it
+# is never widened by semver inference. Adding a version means adding it here
+# only after the clean-profile smoke passes for it.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dsh-version: ["0.1.6-alpha.2"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm run pack:check
+      - run: node scripts/clean-profile-smoke.mjs "${{ matrix.dsh-version }}"

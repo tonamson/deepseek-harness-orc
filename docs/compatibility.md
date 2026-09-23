@@ -16,7 +16,9 @@ under [Concerns](#concerns-handed-to-later-tasks).
 | Published support set | `@deepseek-ai/dsh*` exactly `0.1.6-alpha.2` (no range, no caret) |
 | DSH resolved by `npm install` | `@deepseek-ai/dsh` `0.1.6-alpha.2` |
 | Declaration source | `node_modules/@deepseek-ai/*/lib/types/**.d.ts` |
-| Archive contract test | `tests/bundle.spec.ts` |
+| Archive contract test | `tests/integration/bundle.spec.ts` |
+| Compatibility pinning test | `tests/integration/compatibility.spec.ts` |
+| Clean-profile smoke | `scripts/clean-profile-smoke.mjs <exact version>` |
 
 `npm install` resolves the manifest's `peerDependencies`/`devDependencies` to
 the `0.1.6-alpha.2` line and installs the full DSH tree, so every
@@ -397,6 +399,112 @@ exactly what Step 3a's stated proof requires.
   the loader imports a declared `./typert` export and fails loud on a broken
   artifact, and this bundle has none to declare.
 
+## Task 10 release gate
+
+Status: **PASS** on the single supported version. The gate is
+`tests/integration/bundle.spec.ts` (archive contract),
+`tests/integration/compatibility.spec.ts` (support set and extension
+contracts), `tests/integration/disabled.spec.ts` (profile lifecycle), and
+`scripts/clean-profile-smoke.mjs` (clean-profile installation), driven by
+`.github/workflows/ci.yml`.
+
+### Supported set and CI matrix
+
+The published support set is exactly **`@deepseek-ai/dsh*` `0.1.6-alpha.2`**.
+The CI matrix is a **single entry** for that version; there is no second
+candidate and no range. The narrowing and its cause (absent
+`ctx.settings.installSection` / `ctx.settingsScope` in `0.1.7-alpha.2`) are
+recorded in [Support-range finding](#support-range-finding). The workflow
+comments state that adding a version means adding a matrix entry only after the
+smoke passes for it; it is never widened by semver inference.
+
+### Exact passing versions
+
+The gate ran with:
+
+| Item | Version |
+|---|---|
+| `@deepseek-ai/dsh` (CLI used by the smoke harness) | `0.1.6-alpha.2` |
+| `@deepseek-ai/dsh-settings`, `dsh-tools`, `dsh-llm`, `dsh-session`, `dsh-subagent`, `dsh-subprocess`, `dsh-typert-protocol`, `dsh-system-prompt`, `dsh-client-ui-settings` | `0.1.6-alpha.2` |
+| `@deepseek-ai/cordis` | `4.0.4` |
+| `@deepseek-ai/schemastery` | `3.18.4` |
+| Node.js / npm / pnpm | v24.19.0 / 12.0.2 / 11.7.0 |
+
+`tests/integration/compatibility.spec.ts` asserts every one of these exact
+versions and every DSH peer pin (`"0.1.6-alpha.2"`, no caret, tilde, range, or
+`||`).
+
+### Extension contracts the gate pins
+
+Read from the installed `0.1.6-alpha.2` declarations, so a DSH upgrade that
+removes or reshapes one fails before it can ship:
+
+| Contract | Pinned declaration |
+|---|---|
+| `ctx.settings.installSection` | `installSection<const Namespace extends string, T>(owner: Context, ns: Namespace & SettingsNamespaceInput<Namespace>, schema: z<T>, entry: T, hooks: SettingsSectionHooks<T>): void` on `abstract class SettingsProvider extends Service` |
+| `ctx.settingsScope` | `settingsScope: SettingsScopeBinder` with `bind<T>(spec: SettingsScopeSpec<T>): SettingsScope<T>` |
+| `settings.section` client slot | `'settings.section'` and `SettingsSectionOwnerProps` |
+| `defineTool` | `export declare function defineTool` |
+| `ctx.systemPrompt.section` | `section(section: PromptSection): () => void` |
+| `ctx.llm.stream` | `stream(options: GenerateOptions): AsyncIterable<StreamChunk>` |
+| `ctx.subagents.startContinuable` | `startContinuable(spec: ContinuableStartSpec): Promise<ContinuableStart>` |
+| `ctx.subprocess.spawn` | `spawn(spec: SubprocessSpawnSpec): SubprocessHandle` |
+| Typert host seams | `export declare abstract class TypertRemoteService` and `export declare function Remote` |
+
+`./typert` and `./remote` stay undeclared: the published generator cannot build
+them for this external package, and the loader fails loud on a declared-but-
+broken artifact (see [Task 8 Step 3a](#task-8-step-3a-typert-wire-artifacts-and-the-manual-contribution-path)).
+
+### Archive contract
+
+`tests/integration/bundle.spec.ts` packs the repository with `npm pack --json`
+and extracts the archive. It asserts one package under the published name and
+version; the presence of `cordis.patch.yml`, `lib/host/index.js`,
+`lib/host/remote-host.js`, the lazy-CJS `lib/client.js`, `lib/client/locales.js`
+(the `settings.orc` namespace), `README.md`, and the benchmark fixtures; the two
+Loader rows and only those rows; the lazy-CJS factory shape
+(`window.__ModuleLoader__.load({ id: '@tonamson/dsh-orc', factory(require) … })`);
+and that the whole manifest and lockfile contain no `workspace:` dependency.
+The `README.md` assertion is load-bearing: it is listed in `package.json`
+`files`, so a missing README cannot pass silently.
+
+### Clean-profile smoke result
+
+`node scripts/clean-profile-smoke.mjs "0.1.6-alpha.2"` completed:
+
+- packed the bundle into its own `mkdtemp` directory;
+- created a disposable `$DSH_HOME` and Web profile;
+- installed the tarball through `dsh plugin --profile web add file:<absolute>`;
+- inspected the **installed** archive (manifest, patch rows, Host JS, lazy-CJS
+  Client JS, locale strings, README, benchmark fixture manifest);
+- composed the profile with `dsh --profile web --dump-config` and confirmed both
+  ORC rows appear on enable, disappear on disable, reappear on re-enable, and
+  disappear after removal, while the non-ORC composed rows stay byte-identical;
+- confirmed the seeded user patch layer (global model default) and the
+  credentials document are byte-identical before and after every action;
+- drove spec → plan → Lead/Peer → task settle → review (medium finding blocks
+  completion) → fix → review → audit → final branch review and audit →
+  `completed` through the installed `OrcService` with keyless fake ports;
+- removed the bundle and confirmed the dependency and selection are gone.
+
+The smoke never boots a Web server and never calls a model provider. It fails
+loudly with an actionable message when the CLI, the archive, or the install path
+is unavailable; it never reports success for a step it could not run.
+
+### Lifecycle note: disable ordering
+
+The bundle's unload disposes the ORC service (which aborts the run lifetime and
+settles an in-flight delegated child startup durably) and the ORC session
+projection in the same Cordis fiber unload. The settlement write is a microtask
+triggered by the abort, while the projection effect's disposer runs in the same
+unload batch, so a startup cancelled *by the unload itself* can lose the race to
+write `orc/fail`. `tests/integration/disabled.spec.ts` therefore pins the
+settlement at the point the ORC service is disposed — the first unload step the
+Host composition performs — and pins contribution removal, the absence of an
+orphan child, and unchanged DSH defaults across the full disable. A future Host
+change that settles active runs before the projection is disposed should move
+that assertion after the complete disable.
+
 ## Concerns handed to later tasks
 
 These are recorded here as gate output. Task 1 does not change later tasks.
@@ -470,3 +578,14 @@ These are recorded here as gate output. Task 1 does not change later tasks.
     fresh `CliAdapter` therefore has no green probe and `run` rejects until
     `probe` or `catalog` has succeeded; Task 8 must persist or re-derive that
     evidence if a probe is expected to survive a process restart.
+13. **Task 10 — disable-time settlement ordering.** The Host's fiber unload
+    disposes the ORC service and the ORC session projection in the same batch,
+    and the projection effect's disposer runs before the aborted child startup's
+    settlement microtask. An active delegated run is therefore cancelled on
+    disable (no orphan child, no completion), but the durable `orc/fail` write
+    for a startup cancelled *by that same unload* cannot land after the
+    projection is gone. See
+    [Lifecycle note: disable ordering](#lifecycle-note-disable-ordering). A
+    future Host change should settle active runs before disposing the
+    projection; Task 10 pins the settlement at the service-disposal step and
+    reports the gap rather than weakening the assertion.
