@@ -123,6 +123,38 @@ it('rejects a stored section that smuggles in a credential field', () => {
   expect(() => validate(ConfigSchema({ providerApiKey: 'secret' }))).toThrow(/unknown field/)
 })
 
+it('rejects a stored route that carries an unknown credential field', () => {
+  const ctx = fakeContext()
+  installOrcSettings(ctx, parseConfig({ allowed: [] }))
+  const validate = ctx.calls[0]!.hooks.validate!
+  const stored = ConfigSchema({
+    allowed: [{ kind: 'provider', provider: 'custom', model: 'm', effort: 'high', apiKey: 'secret' }],
+  })
+  // The schema preserves nested extras, so the guard must reject the resolved value itself.
+  expect(JSON.stringify(stored)).toMatch(/apiKey/)
+  expect(() => validate(stored)).toThrow(/unknown field/)
+})
+
+it('rejects empty route and CLI-path strings the schema accepts but the parser refuses', () => {
+  const ctx = fakeContext()
+  installOrcSettings(ctx, parseConfig({ allowed: [] }))
+  const validate = ctx.calls[0]!.hooks.validate!
+  expect(() => validate(ConfigSchema({
+    allowed: [{ kind: 'provider', provider: '', model: 'm', effort: 'high' }],
+  }))).toThrow(/non-empty string/)
+  expect(() => validate(ConfigSchema({
+    allowed: [{ kind: 'cli', cli: 'codex', model: 'gpt-5', effort: '' }],
+  }))).toThrow(/non-empty string/)
+  expect(() => validate(ConfigSchema({ cliPaths: { codex: '' } }))).toThrow(/non-empty string/)
+})
+
+it('accepts the resolved default config on the settings write path', () => {
+  const ctx = fakeContext()
+  installOrcSettings(ctx, parseConfig({ allowed: [] }))
+  const validate = ctx.calls[0]!.hooks.validate!
+  expect(() => validate(ConfigSchema({}))).not.toThrow()
+})
+
 it('registers its teardown as a Cordis effect and disposes the bridge on unload', () => {
   const ctx = fakeContext()
   const installed = installOrcSettings(ctx, parseConfig({ allowed: [provider] }))

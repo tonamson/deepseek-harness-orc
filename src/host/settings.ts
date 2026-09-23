@@ -13,7 +13,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { SettingsSectionHooks } from '@deepseek-ai/dsh-settings'
-import { ConfigSchema, assertConfigRules, configRevision, connectionRevision } from '../domain/config.js'
+import { ConfigSchema, configRevision, connectionRevision, parseConfig } from '../domain/config.js'
 import type { OrcConfig, Route } from '../domain/types.js'
 
 /** Observer notified with the new config revision after a committed change. */
@@ -78,7 +78,7 @@ export function installOrcSettings(ctx: Context, base: OrcConfig): OrcSettingsIn
       for (const listener of [...listeners]) listener(next)
     },
     validate: (value) => {
-      assertConfigRules(value)
+      parseConfig(value)
     },
   }
 
