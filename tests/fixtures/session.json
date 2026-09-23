@@ -73,14 +73,11 @@
         },
         "prompt": {
           "type": "string",
-          "description": "dispatch: the work the stage receives."
+          "description": "dispatch/final-review/final-audit: the work the stage receives."
         },
         "reason": {
           "type": "string",
           "description": "dismiss: why the finding does not block."
-        },
-        "report": {
-          "description": "final-review/final-audit: the review or audit report payload."
         }
       },
       "required": [
@@ -88,7 +85,7 @@
       ]
     }
   },
-  "policy": "## ORC workflow\nClassify every request before implementing it, and use the `orc` tool to record the decision.\n\n- Small, isolated, low-risk work — a typo, a small documentation correction, one contained visual adjustment — may be handled directly, without ORC state.\n- Multi-step, multi-file, architectural, explicitly planned, or explicitly reviewed work starts ORC.\n- Money movement, balances, payments, authentication, authorization, security-sensitive behavior, and similarly high-impact paths always start ORC, however small the diff.\n- If direct work reveals substantial scope or high risk before implementation, classify it again with `discoveredRisk` set, start ORC, and only then continue implementing.\n\nOnce ORC starts, this session is the Supervisor of an ORC run: the run's Lead owns tasks, reviews, and fixes; Peers implement. The ORC service validates role authority, phase order, task settlement, review and audit results, fixes, and completion — a phase or authority refusal is final until the state that caused it changes.\nReview and security audit are separate stages. Critical, high, and medium findings block until they are fixed and re-reviewed. A failed, malformed, missing, or unavailable review or audit is blocking and is never a clean result.",
+  "policy": "## ORC workflow\nClassify every request before implementing it, and use the `orc` tool to record the decision.\n\n- Small, isolated, low-risk work — a typo, a small documentation correction, one contained visual adjustment — may be handled directly, without ORC state.\n- Multi-step, multi-file, architectural, explicitly planned, or explicitly reviewed work starts ORC.\n- Money movement, balances, payments, authentication, authorization, security-sensitive behavior, and similarly high-impact paths always start ORC, however small the diff.\n- If direct work reveals substantial scope or high risk before implementation, classify it again with `discoveredRisk` set, start ORC, and only then continue implementing.\n\nOnce ORC starts, this session is the Supervisor of an ORC run: the run's Lead owns tasks, reviews, and fixes; Peers implement. The ORC service validates role authority, phase order, task settlement, review and audit results, fixes, and completion — a phase or authority refusal is final until the state that caused it changes.\nReview and security audit are separate stages, and the final branch review and audit are separate gates that ORC routes and dispatches itself. Every one of them runs on a route ORC selects; a report you write is never accepted in place of the report the selected backend produced. Critical, high, and medium findings block until they are fixed and re-reviewed. A failed, malformed, missing, or unavailable review or audit is blocking and is never a clean result.",
   "classification": {
     "direct": {
       "action": "classify",

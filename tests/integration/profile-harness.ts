@@ -441,6 +441,9 @@ export class ProfileRuntime {
     provide('systemPrompt', {})
     provide('agents', {
       list: () => [...this.agents.values()],
+      // DSH's runtime authority on top-level agents. The harness registers only
+      // roots, so every live agent it tracks is one.
+      roots: () => [...this.agents.values()],
       get: (id: SessionId) => this.agents.get(String(id)),
     })
     provide('llm', {

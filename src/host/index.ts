@@ -146,9 +146,19 @@ export function apply(ctx: Context, config: OrcConfig): void {
     if (installed.has(agent)) return
     installed.set(agent, installOrcTool(agent, service))
   }
-  for (const agent of ctx.agents.list()) install(agent)
+  /**
+   * Whether DSH reports one agent as a top-level agent.
+   *
+   * Only a root can be a Supervisor: a subagent is a member of the run that
+   * started it, never the owner of one. DSH's own registry is the authority on
+   * that runtime relation (`ctx.agents.roots()`), so a child created through
+   * `ctx.subagents` — including a child of another plugin — never receives the
+   * ORC tool, policy, or pre-step gate and cannot be pulled into a stray run.
+   */
+  const isRoot = (agent: Agent): boolean => ctx.agents.roots().includes(agent)
+  for (const agent of ctx.agents.roots()) install(agent)
   ctx.on('agent/created', ({ agent }) => {
-    install(agent)
+    if (isRoot(agent)) install(agent)
     return undefined
   })
   ctx.on('agent/disposed', ({ agent }) => {

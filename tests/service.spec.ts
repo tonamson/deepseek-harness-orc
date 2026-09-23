@@ -12,6 +12,7 @@ import { describe, expect, it } from 'vitest'
 import { routeKey } from '../src/domain/config.js'
 import { parseConfig } from '../src/domain/config.js'
 import { RouteError } from '../src/domain/routing.js'
+import type { RouteDecision } from '../src/domain/routing.js'
 import type { OrcStartRecord } from '../src/host/journal.js'
 import { OrcService } from '../src/host/service.js'
 import { ORC_LEAD_LABEL } from '../src/host/service.js'
@@ -22,7 +23,7 @@ import {
   SUPERVISOR_ID,
   type FakePorts,
 } from './fixtures/ports.js'
-import { claudeRoute, codexRoute, config as fixtureConfig, planRoute } from './fixtures/routes.js'
+import { claudeRoute, codexRoute, config as fixtureConfig, planRoute, routeBackend } from './fixtures/routes.js'
 
 /** The clean review/audit report the workflow completes with. */
 const cleanReport = { status: 'clean', findings: [] }
@@ -41,6 +42,12 @@ const mediumReport = {
 }
 
 const signal = new AbortController().signal
+
+/** The committed route decisions of one fixture run, in commit order. */
+const routeDecisions = (ports: FakePorts): RouteDecision[] =>
+  ports.journal.events
+    .filter(event => event.type === 'orc/route')
+    .map(event => (event.data as Extract<typeof event.data, { type: 'orc/route' }>).decision)
 
 /** Run the run up to the implement phase, where a lead and peers may be created. */
 async function toImplement(ports: FakePorts, svc: OrcService): Promise<void> {
@@ -589,8 +596,10 @@ describe('blocking failures and gates', () => {
     await toImplement(ports, svc)
     expect(svc.state(ports.supervisor).phase).toBe('implement')
 
-    await expect(svc.finalBranchReview(ports.supervisor, cleanReport)).rejects.toThrow(/blocking/)
+    await expect(svc.finalBranchReview(ports.supervisor, 'final review', signal)).rejects.toThrow(/blocking/)
     expect(eventNames(ports)).not.toContain('orc/final-review-request')
+    // The two spec/plan dispatches routed; the refused gate added no third.
+    expect(eventNames(ports).filter(name => name === 'orc/route')).toHaveLength(2)
   })
 
   it('does not let a task advance before both gates are clean', async () => {
@@ -602,10 +611,13 @@ describe('blocking failures and gates', () => {
     expect(svc.state(ports.supervisor).phase).toBe('fix')
 
     await expect(svc.startTask(lead, peer, 'task-2')).rejects.toThrow(/phase/)
-    await expect(svc.finalBranchReview(ports.supervisor, cleanReport)).rejects.toThrow(/phase/)
+    await expect(svc.finalBranchReview(ports.supervisor, 'final review', signal)).rejects.toThrow(/phase/)
+    // The refused gate logged no route decision: spec and plan routed, and the
+    // task review that opened the fix phase did too.
+    expect(ports.journal.events.filter(event => event.type === 'orc/route')).toHaveLength(3)
 
     await svc.fix(lead, 'F-1')
-    await expect(svc.finalBranchReview(ports.supervisor, cleanReport)).rejects.toThrow(/phase/)
+    await expect(svc.finalBranchReview(ports.supervisor, 'final review', signal)).rejects.toThrow(/phase/)
 
     ports.reports.push(cleanReport, cleanReport)
     await svc.dispatch(ports.supervisor, 'review', 'review task-1 again', signal)
@@ -616,14 +628,70 @@ describe('blocking failures and gates', () => {
     // that work earned its own clean review and audit cycle.
     await svc.startTask(lead, peer, 'task-2')
     await svc.settleTask(peer, 'task-2')
-    await expect(svc.finalBranchReview(ports.supervisor, cleanReport)).rejects.toThrow(/task-level/)
+    await expect(svc.finalBranchReview(ports.supervisor, 'final review', signal)).rejects.toThrow(/task-level/)
 
-    ports.reports.push(cleanReport, cleanReport)
+    ports.reports.push(cleanReport, cleanReport, cleanReport, cleanReport)
     await svc.dispatch(ports.supervisor, 'review', 'review task-2', signal)
     await svc.dispatch(ports.supervisor, 'audit', 'audit task-2', signal)
-    await svc.finalBranchReview(ports.supervisor, cleanReport)
-    await svc.finalBranchAudit(ports.supervisor, cleanReport)
+    await svc.finalBranchReview(ports.supervisor, 'final branch review', signal)
+    await svc.finalBranchAudit(ports.supervisor, 'final branch audit', signal)
     await expect(svc.complete(ports.supervisor)).resolves.toMatchObject({ phase: 'completed' })
+
+    // Both final gates were routed through the selector and dispatched: the
+    // route decisions are durable, and the final audit ran on a different
+    // backend from the final review.
+    const decisions = routeDecisions(ports)
+    const finalReview = decisions.at(-2)!
+    const finalAudit = decisions.at(-1)!
+    expect(finalReview).toMatchObject({ stage: 'review', risk: { risk: 'high' } })
+    expect(finalAudit).toMatchObject({ stage: 'audit', risk: { risk: 'high' } })
+    expect(routeBackend(finalAudit.route)).not.toBe(routeBackend(finalReview.route))
+    expect(ports.clis.runs.filter(run => run.prompt === 'final branch review')).toHaveLength(1)
+    expect(ports.clis.runs.filter(run => run.prompt === 'final branch audit')).toHaveLength(1)
+  })
+
+  it('records only the report the final gate dispatch produced', async () => {
+    const ports = fakePorts()
+    const svc = new OrcService(ports)
+    const { lead, peer } = await toReview(ports, svc)
+    ports.reports.push(cleanReport, cleanReport)
+    await svc.dispatch(ports.supervisor, 'review', 'review task-1', signal)
+    await svc.dispatch(ports.supervisor, 'audit', 'audit task-1', signal)
+    expect(svc.state(ports.supervisor).taskGate).toBe('passed')
+
+    // The backend's own report is what lands: the tool has no report field, so
+    // a model cannot supply one for a final gate.
+    ports.reports.push(mediumReport)
+    const state = await svc.finalBranchReview(ports.supervisor, 'final branch review', signal)
+    expect(state.finalReview).toBe('blocked')
+    expect(state.findings).toMatchObject([{ id: 'F-1', severity: 'medium', status: 'open' }])
+
+    // A blocking final review is re-reviewable: the fix cycle the reducer
+    // requires is a task-level review and audit, and the final gates then reopen.
+    await svc.fix(lead, 'F-1')
+    ports.reports.push(cleanReport, cleanReport, cleanReport, cleanReport)
+    await svc.dispatch(ports.supervisor, 'review', 'review task-1 after fix', signal)
+    await svc.dispatch(ports.supervisor, 'audit', 'audit task-1 after fix', signal)
+    await svc.finalBranchReview(ports.supervisor, 'final branch review again', signal)
+    await svc.finalBranchAudit(ports.supervisor, 'final branch audit', signal)
+    await expect(svc.complete(ports.supervisor)).resolves.toMatchObject({ phase: 'completed' })
+  })
+
+  it('blocks a malformed final gate answer instead of normalizing it', async () => {
+    const ports = fakePorts()
+    const svc = new OrcService(ports)
+    const { peer } = await toReview(ports, svc)
+    ports.reports.push(cleanReport, cleanReport, cleanReport)
+    await svc.dispatch(ports.supervisor, 'review', 'review task-1', signal)
+    await svc.dispatch(ports.supervisor, 'audit', 'audit task-1', signal)
+    await svc.finalBranchReview(ports.supervisor, 'final branch review', signal)
+
+    // The audit's route answered with something that is not a report.
+    ports.reports.push('not a report')
+    await expect(svc.finalBranchAudit(ports.supervisor, 'final branch audit', signal)).rejects.toThrow(/blocking/)
+    expect(ports.journal.events.at(-1)!.type).toBe('orc/fail')
+    expect(svc.state(ports.supervisor).phase).toBe('failed')
+    expect(peer.id).toBeDefined()
   })
 
   it('blocks the run when child startup fails', async () => {

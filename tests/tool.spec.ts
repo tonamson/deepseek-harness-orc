@@ -21,6 +21,9 @@ const SNAPSHOT_PATH = 'tests/fixtures/session.json'
 /** The high-impact request the brief's gate test admits. */
 const HIGH_IMPACT_REQUEST = 'Fix payment authorization before release'
 
+/** The clean review/audit report the workflow completes with. */
+const cleanReport = { status: 'clean', findings: [] }
+
 const signal = new AbortController().signal
 
 /** A minimal execution context: the tool reads only the caller and the signal. */
@@ -107,11 +110,13 @@ describe('Agent-scoped installation', () => {
       'plannedFiles',
       'prompt',
       'reason',
-      'report',
       'request',
       'stage',
       'taskId',
     ])
+    // No report field: a final gate's report comes from the route ORC
+    // dispatched, never from the model.
+    expect(Object.keys(properties)).not.toContain('report')
     expect(Object.keys(properties)).not.toContain('provider')
     expect(Object.keys(properties)).not.toContain('model')
     expect(Object.keys(properties)).not.toContain('effort')
@@ -269,6 +274,31 @@ describe('tool actions', () => {
     const { agent, tool } = install(ports, service)
     await expect(tool.execute({ action: 'dispatch', stage: 'spec' }, execFor(agent))).rejects.toThrow(/prompt/)
     await expect(tool.execute({ action: 'create-peer' }, execFor(agent))).rejects.toThrow(/peerName/)
+    // A final gate needs the work it dispatches; there is no report argument to
+    // fall back on.
+    await expect(tool.execute({ action: 'final-review' }, execFor(agent))).rejects.toThrow(/prompt/)
+    await expect(tool.execute({ action: 'final-audit' }, execFor(agent))).rejects.toThrow(/prompt/)
+  })
+
+  it('dispatches a final gate through the service instead of accepting a report', async () => {
+    const ports = fakePorts()
+    const service = new OrcService(ports)
+    const { agent, tool } = install(ports, service)
+    await service.start(agent, HIGH_RISK)
+    await service.dispatch(agent, 'spec', 'spec input', signal)
+    await service.dispatch(agent, 'plan', 'plan input', signal)
+    const lead = await service.createLead(agent)
+    const peer = await service.createPeer(lead, 'peer-1')
+    await service.startTask(lead, peer, 'task-1')
+    await service.settleTask(peer, 'task-1')
+    ports.reports.push(cleanReport, cleanReport, cleanReport, cleanReport)
+    await service.dispatch(agent, 'review', 'review task-1', signal)
+    await service.dispatch(agent, 'audit', 'audit task-1', signal)
+
+    const value = await tool.execute({ action: 'final-review', prompt: 'final branch review' }, execFor(agent))
+    expect(value).toMatchObject({ action: 'final-review', finalReview: 'clean' })
+    // The selected route really received the prompt.
+    expect(ports.clis.runs.filter(run => run.prompt === 'final branch review')).toHaveLength(1)
   })
 
   it('refuses a tool call without a calling agent', async () => {

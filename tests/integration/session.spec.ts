@@ -67,11 +67,11 @@ describe('complete fake workflow', () => {
     await expect(svc.complete(supervisor)).rejects.toThrow(/blocking/)
     expect(svc.state(supervisor).findings).toMatchObject([{ id: 'F-1', severity: 'medium', status: 'open' }])
     await svc.fix(lead, 'F-1')
-    ports.reports.push(cleanReport, cleanReport)
+    ports.reports.push(cleanReport, cleanReport, cleanReport, cleanReport)
     await svc.dispatch(supervisor, 'review', 'review task-1 again', signal)
     await svc.dispatch(supervisor, 'audit', 'audit task-1', signal)
-    await svc.finalBranchReview(supervisor, cleanReport)
-    await svc.finalBranchAudit(supervisor, cleanReport)
+    await svc.finalBranchReview(supervisor, 'final branch review', signal)
+    await svc.finalBranchAudit(supervisor, 'final branch audit', signal)
     await expect(svc.complete(supervisor)).resolves.toMatchObject({ phase: 'completed' })
 
     const events = ports.journal.events.map(event => event.type)
@@ -98,13 +98,24 @@ describe('complete fake workflow', () => {
       'orc/route',
       'orc/audit-request',
       'orc/audit-result',
+      'orc/route',
       'orc/final-review-request',
       'orc/final-review-result',
+      'orc/route',
       'orc/final-audit-request',
       'orc/final-audit-result',
       'orc/complete',
     ])
     expect(ports.journal.sessions.every(id => id === SUPERVISOR_ID)).toBe(true)
+
+    // Every analysis stage, including both final gates, carries a durable route
+    // decision: nothing is self-attested.
+    const decisions = ports.journal.events
+      .filter(event => event.type === 'orc/route')
+      .map(event => (event.data as { decision: { stage: string } }).decision)
+    expect(decisions.map(decision => decision.stage)).toEqual([
+      'spec', 'plan', 'review', 'review', 'audit', 'review', 'audit',
+    ])
   })
 })
 

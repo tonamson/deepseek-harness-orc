@@ -60,6 +60,16 @@ import type { OrcSettingsBridge } from './settings.js'
 /** The DSH subagent provider ORC creates its continuable children with. */
 export const ORC_CHILD_PROVIDER = 'spawn'
 
+/**
+ * The classification every final branch gate routes under.
+ *
+ * A final gate is the last review and audit before a branch is presented for
+ * integration, so it is always high-risk: it requires the same validated
+ * benchmark evidence a high-risk task-level review does, and the paired audit
+ * must run on a different backend.
+ */
+const FINAL_GATE_RISK: RiskDecision = { path: 'orc', risk: 'high', reasons: ['final branch gate'] }
+
 /** The label ORC gives its lead child. */
 export const ORC_LEAD_LABEL = 'ORC lead'
 
@@ -557,50 +567,108 @@ export class OrcService {
   }
 
   /**
-   * Run the final branch review from an already-produced report.
+   * Run the final branch review.
+   *
+   * The gate is routed and dispatched exactly like a task-level review — high
+   * risk, so it needs validated evidence, and the paired audit must not reuse
+   * its backend — and the report it records is the one the selected route
+   * produced. The model cannot supply a report for a final gate.
    *
    * Refuses a run with no tasks: the reducer's completion predicate is vacuous
    * over an empty task list, so the service refuses to open the final gates
    * without task evidence. `canComplete` is not weakened.
+   *
+   * @param supervisor - the run's Supervisor, the only actor allowed to open a final gate.
+   * @param prompt - the work the final review receives.
+   * @param signal - ends the dispatch early.
    */
-  async finalBranchReview(supervisor: Agent, raw: unknown): Promise<OrcState> {
-    const runId = this.runIdOf(supervisor)
-    return await this.serialize(runId, async () => {
-      const session = this.sessionOf(runId)
-      const state = this.ports.journal.state(session)
-      this.requireSupervisor(state, supervisor)
-      this.requireTaskEvidence(state, 'final review')
-      const correlationId = `final-review:${runId}`
-      await this.commit(session, {
-        ...this.envelope(runId, 'supervisor', supervisor.id),
-        type: 'final-review-request',
-        correlationId,
-      })
-      const report = await this.validatedReport(session, runId, 'review', raw)
-      return await this.commit(session, this.resultEvent(runId, 'review', correlationId, report, 'final-review'))
-    })
+  async finalBranchReview(supervisor: Agent, prompt: string, signal: AbortSignal): Promise<OrcState> {
+    return await this.finalGate(supervisor, 'review', prompt, signal)
   }
 
-  /** Run the final branch audit from an already-produced report. */
-  async finalBranchAudit(supervisor: Agent, raw: unknown): Promise<OrcState> {
-    const runId = this.runIdOf(supervisor)
-    return await this.serialize(runId, async () => {
-      const session = this.sessionOf(runId)
-      const state = this.ports.journal.state(session)
-      this.requireSupervisor(state, supervisor)
-      this.requireTaskEvidence(state, 'final audit')
-      const correlationId = `final-audit:${runId}`
-      await this.commit(session, {
-        ...this.envelope(runId, 'supervisor', supervisor.id),
-        type: 'final-audit-request',
-        correlationId,
-      })
-      const report = await this.validatedReport(session, runId, 'audit', raw)
-      return await this.commit(session, this.resultEvent(runId, 'audit', correlationId, report, 'final-audit'))
-    })
+  /**
+   * Run the final branch audit.
+   *
+   * @param supervisor - the run's Supervisor, the only actor allowed to open a final gate.
+   * @param prompt - the work the final audit receives.
+   * @param signal - ends the dispatch early.
+   */
+  async finalBranchAudit(supervisor: Agent, prompt: string, signal: AbortSignal): Promise<OrcState> {
+    return await this.finalGate(supervisor, 'audit', prompt, signal)
   }
 
   // ------------------------------------------------------------------ private
+
+  /**
+   * Route, dispatch, and record one final branch gate.
+   *
+   * The gate is high-risk by construction: it is the last review or audit before
+   * a branch is presented for integration, so it requires the same validated
+   * benchmark evidence a high-risk task-level review does, and the audit's
+   * `prior` is the most recent review decision — the final review that just ran
+   * — so the independent-backend rule applies.
+   *
+   * Ordering is load-bearing. The lifecycle transition is validated against the
+   * committed state *before* anything is logged, so a wrong phase leaves no
+   * orphan route decision; the route decision is then committed before the
+   * dispatch it authorizes; and the request is committed before the delegated
+   * run starts, so a crash mid-dispatch is recoverable.
+   */
+  private async finalGate(
+    supervisor: Agent,
+    stage: 'review' | 'audit',
+    prompt: string,
+    signal: AbortSignal,
+  ): Promise<OrcState> {
+    const runId = this.runIdOf(supervisor)
+    return await this.serialize(runId, async () => {
+      const session = this.sessionOf(runId)
+      const state = this.ports.journal.state(session)
+      this.requireSupervisor(state, supervisor)
+      this.requireTaskEvidence(state, `final ${stage}`)
+      // One round per committed request for this gate, so a re-review after a
+      // fix cycle allocates a fresh identity instead of colliding with the
+      // first. A gate whose request was committed but whose result never landed
+      // has already blocked the run, so there is no pending request to resume.
+      const round = state.requests.filter(request => request.stage === `final-${stage}`).length + 1
+      const correlationId = `final-${stage}:${runId}:${round}`
+      const request: OrcEvent = stage === 'review'
+        ? { ...this.envelope(runId, 'supervisor', supervisor.id), type: 'final-review-request', correlationId }
+        : { ...this.envelope(runId, 'supervisor', supervisor.id), type: 'final-audit-request', correlationId }
+      // Refuse a wrong phase (or an unsettled task) before logging anything.
+      reduce(state, request)
+      const config = this.ports.settings.config()
+      const prior = stage === 'audit' ? this.lastReviewDecision(session) : undefined
+      let decision: RouteDecision
+      try {
+        const catalog = await this.catalogFor(signal)
+        decision = selectRoute(stage, FINAL_GATE_RISK, config, catalog, this.ports.benchmarks, this.now(), prior)
+      } catch (error) {
+        await this.block(session, runId, `route selection for the final ${stage} failed: ${safeReason(error)}`)
+        throw error
+      }
+      await this.ports.journal.commit(session, {
+        version: 1,
+        type: ORC_ROUTE_EVENT,
+        runId,
+        at: this.now(),
+        decision,
+      })
+      await this.commit(session, request)
+      const text = await this.runRoute(session, runId, decision, prompt, signal)
+      let report: unknown
+      try {
+        report = this.stageReport(stage, text)
+      } catch (error) {
+        await this.block(session, runId, `final ${stage} report blocked: ${safeReason(error)}`)
+        throw error
+      }
+      return await this.commit(
+        session,
+        this.resultEvent(runId, stage, correlationId, report, stage === 'review' ? 'final-review' : 'final-audit'),
+      )
+    })
+  }
 
   /** Bind one run to the session that owns its durable log. */
   private bindSession(runId: string, session: Session): void {
@@ -808,22 +876,6 @@ export class OrcService {
     const raw: unknown = JSON.parse(text)
     parseReport(raw, stage)
     return raw
-  }
-
-  /** Validate one final-gate report; a refusal blocks the run. */
-  private async validatedReport(
-    session: Session,
-    runId: string,
-    stage: 'review' | 'audit',
-    raw: unknown,
-  ): Promise<unknown> {
-    try {
-      parseReport(raw, stage)
-      return raw
-    } catch (error) {
-      await this.block(session, runId, `${stage} report blocked: ${safeReason(error)}`)
-      throw error
-    }
   }
 
   /** Verify a route and dispatch one prompt through its own backend. */

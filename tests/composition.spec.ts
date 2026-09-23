@@ -44,8 +44,10 @@ interface InstallCall {
 interface Composition {
   ctx: CordisContext
   supervisor: FakeAgent
-  /** Register one more live agent, as DSH's registry would. */
+  /** Register one more live top-level agent, as DSH's registry would. */
   createAgent(id: string): FakeAgent
+  /** Register one live child of an existing agent, as `ctx.subagents` does. */
+  createChild(id: string, parent: FakeAgent): FakeAgent
   /** Every settings section the fake provider was asked to install. */
   installs: InstallCall[]
 }
@@ -73,8 +75,12 @@ function provide(ctx: CordisContext, service: string, value: unknown): void {
 function composition(): Composition {
   const { ctx } = fakeDshSessionServices()
   const live = new Map<string, FakeAgent>()
+  // `roots()` is DSH's runtime authority on which agents are top-level; the
+  // fake models it from durable session lineage, which is what a continuable
+  // child created through `ctx.subagents` carries.
   const agents = {
     list: () => [...live.values()],
+    roots: () => [...live.values()].filter(agent => agent.session.header.parentSession === undefined),
     get: (id: SessionId) => live.get(String(id)),
   }
   const installs: InstallCall[] = []
@@ -99,15 +105,21 @@ function composition(): Composition {
   provide(ctx, 'llm', {})
   provide(ctx, 'subprocess', {})
 
+  const register = (id: string, parent?: FakeAgent): FakeAgent => {
+    const child = ctx.get('sessions')!.create(SessionId(id), {
+      ...parent === undefined ? {} : { meta: { parentSession: parent.session.id, origin: 'subagent' as const } },
+    })
+    const agent = fakeAgent({ id, role: 'supervisor', session: child, agents })
+    live.set(id, agent)
+    return agent
+  }
+
   return {
     ctx,
     supervisor,
     installs,
-    createAgent: (id) => {
-      const agent = fakeAgent({ id, role: 'supervisor', session: ctx.get('sessions')!.create(SessionId(id)), agents })
-      live.set(id, agent)
-      return agent
-    },
+    createAgent: (id) => register(id),
+    createChild: (id, parent) => register(id, parent),
   }
 }
 
@@ -117,7 +129,7 @@ afterEach(() => {
 
 describe('host composition', () => {
   it('provides the orc service, installs the tool per agent, and unwinds on unload', async () => {
-    const { ctx, supervisor, createAgent, installs } = composition()
+    const { ctx, supervisor, createAgent, createChild, installs } = composition()
     const dispose = vi.spyOn(OrcService.prototype, 'dispose')
 
     // The Loader row's own plugin shape, loaded into a real fiber.
@@ -137,6 +149,14 @@ describe('host composition', () => {
     ctx.emit('agent/created', { agent: late, source: 'startup' })
     expect(late.ctx.tools.get('orc')).toBeDefined()
     expect(late.ctx.systemPrompt.list().map(section => section.name)).toEqual([ORC_SECTION_NAME])
+
+    // A subagent is a member of a run, never a Supervisor: DSH reports it as a
+    // non-root, so ORC installs no tool, no policy, and no gate on it.
+    const child = createChild('session-child', supervisor)
+    expect(child.session.header.parentSession).toBe(supervisor.session.id)
+    ctx.emit('agent/created', { agent: child, source: 'startup' })
+    expect(child.ctx.tools.get('orc')).toBeUndefined()
+    expect(child.ctx.systemPrompt.list()).toHaveLength(0)
 
     // The service is live over the real journal: a durable start reaches the
     // projection, so the composition wired the real seam and not a stub.

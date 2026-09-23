@@ -52,7 +52,7 @@ Classify every request before implementing it, and use the \`orc\` tool to recor
 - If direct work reveals substantial scope or high risk before implementation, classify it again with \`discoveredRisk\` set, start ORC, and only then continue implementing.
 
 Once ORC starts, this session is the Supervisor of an ORC run: the run's Lead owns tasks, reviews, and fixes; Peers implement. The ORC service validates role authority, phase order, task settlement, review and audit results, fixes, and completion — a phase or authority refusal is final until the state that caused it changes.
-Review and security audit are separate stages. Critical, high, and medium findings block until they are fixed and re-reviewed. A failed, malformed, missing, or unavailable review or audit is blocking and is never a clean result.`
+Review and security audit are separate stages, and the final branch review and audit are separate gates that ORC routes and dispatches itself. Every one of them runs on a route ORC selects; a report you write is never accepted in place of the report the selected backend produced. Critical, high, and medium findings block until they are fixed and re-reviewed. A failed, malformed, missing, or unavailable review or audit is blocking and is never a clean result.`
 
 /** Every action the tool accepts. */
 const ACTIONS = [
@@ -110,9 +110,8 @@ const ORC_PARAMETERS = {
     enum: ['code', 'spec', 'plan', 'review', 'audit'],
     description: 'dispatch: the stage to route and run.',
   },
-  prompt: { type: 'string', description: 'dispatch: the work the stage receives.' },
+  prompt: { type: 'string', description: 'dispatch/final-review/final-audit: the work the stage receives.' },
   reason: { type: 'string', description: 'dismiss: why the finding does not block.' },
-  report: { type: 'json', description: 'final-review/final-audit: the review or audit report payload.' },
 } as const satisfies ParameterSchemaSpec
 
 /** The output declaration for the tool's canonical value. */
@@ -311,12 +310,12 @@ async function runAction(
       return valueOf(args.action, next, risk, `finding ${findingId} dismissed`)
     }
     case 'final-review': {
-      const next = await service.finalBranchReview(caller, args.report)
-      return valueOf(args.action, next, risk, 'final branch review recorded')
+      const next = await service.finalBranchReview(caller, required(args.prompt, 'prompt'), signal)
+      return valueOf(args.action, next, risk, 'final branch review dispatched and recorded')
     }
     case 'final-audit': {
-      const next = await service.finalBranchAudit(caller, args.report)
-      return valueOf(args.action, next, risk, 'final branch audit recorded')
+      const next = await service.finalBranchAudit(caller, required(args.prompt, 'prompt'), signal)
+      return valueOf(args.action, next, risk, 'final branch audit dispatched and recorded')
     }
     case 'complete': {
       const next = await service.complete(caller)
