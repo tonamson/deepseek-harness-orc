@@ -49,7 +49,7 @@ Classify every request before implementing it, and use the \`orc\` tool to recor
 - Small, isolated, low-risk work — a typo, a small documentation correction, one contained visual adjustment — may be handled directly, without ORC state, while the session's ORC mode is \`adaptive\`.
 - The session's ORC mode governs how early ORC starts. In \`always\` mode the ORC run opens for every admitted request, however small; in \`adaptive\` mode only the substantial and high-impact work below starts it.
 - Multi-step, multi-file, architectural, explicitly planned, or explicitly reviewed work starts ORC.
-- Money movement, balances, payments, authentication, authorization, security-sensitive behavior, and similarly high-impact paths always start ORC, however small the diff.
+- Money movement, balances, payments, authentication, authorization, security-sensitive behavior, and similarly high-impact paths always start ORC, however small the diff. When you classify or start, declare the paths you expect to touch in \`touchedPaths\`: a declared high-impact path starts ORC even when the request text says nothing about it.
 - If direct work reveals substantial scope or high risk before implementation, classify it again with \`discoveredRisk\` set, start ORC, and only then continue implementing.
 
 Once ORC starts, this session is the Supervisor of an ORC run: the run's Lead owns tasks, reviews, and fixes; Peers implement. The ORC service validates role authority, phase order, task settlement, review and audit results, fixes, and completion — a phase or authority refusal is final until the state that caused it changes.
@@ -86,6 +86,11 @@ const ORC_PARAMETERS = {
   request: {
     type: 'string',
     description: 'classify/start: the request text the risk policy classifies.',
+  },
+  touchedPaths: {
+    type: 'array',
+    items: { type: 'string' },
+    description: 'classify/start: the paths you expect to touch; a high-impact path (money, payments, auth, permissions, security) always starts ORC.',
   },
   plannedFiles: {
     type: 'integer',
@@ -149,6 +154,7 @@ type OrcToolValue = InferValue<typeof ORC_OUTPUT_SCHEMA>
 /** The classification facts one tool call supplies, with the policy defaults applied. */
 function riskOf(args: {
   request?: string
+  touchedPaths?: readonly string[]
   plannedFiles?: number
   architectureChange?: boolean
   explicitPlanOrReview?: boolean
@@ -156,7 +162,7 @@ function riskOf(args: {
 }): RiskDecision {
   return classifyRequest({
     text: args.request ?? '',
-    touchedPaths: [],
+    touchedPaths: args.touchedPaths ?? [],
     plannedFiles: args.plannedFiles ?? 1,
     hasArchitectureChange: args.architectureChange ?? false,
     explicitPlanOrReview: args.explicitPlanOrReview ?? false,

@@ -114,6 +114,7 @@ describe('Agent-scoped installation', () => {
       'request',
       'stage',
       'taskId',
+      'touchedPaths',
     ])
     // No report field: a final gate's report comes from the route ORC
     // dispatched, never from the model.
@@ -237,6 +238,11 @@ describe('pre-step gate', () => {
     expect(ORC_POLICY).toContain('governs exactly one thing: an explicit `dispatch` with `stage: "code"`')
     expect(ORC_POLICY).toContain('inherit this session\'s live provider, model, and effort')
     expect(ORC_POLICY).toContain('`always` mode the ORC run opens for every admitted request')
+    // I2: the policy tells the model to declare the paths it expects to touch,
+    // because that is the only way the path dimension of the risk policy is
+    // reachable from a tool call.
+    expect(ORC_POLICY).toContain('touchedPaths')
+    expect(ORC_POLICY).toContain('declare the paths')
     // R37: ORC states the report contract itself, and a malformed report leaves
     // the stage re-dispatchable instead of failing the run.
     expect(ORC_POLICY).toContain('ORC states the exact report format to the backend it dispatches to')
@@ -299,6 +305,38 @@ describe('tool actions', () => {
     const started = await tool.execute({ action: 'start', request: 'Add a small helper', discoveredRisk: true }, execFor(agent))
     expect(started).toMatchObject({ action: 'start', status: 'spec' })
     expect(ports.journal.events[0]!.type).toBe('orc/start')
+  })
+
+  it('escalates a request that declares a high-impact path', async () => {
+    const ports = fakePorts()
+    const service = new OrcService(ports)
+    const { agent, tool } = install(ports, service)
+
+    // The path dimension is optional: a call that declares nothing keeps the
+    // old, text-only classification.
+    const direct = await tool.execute(
+      { action: 'classify', request: 'Add a small helper', plannedFiles: 1 },
+      execFor(agent),
+    )
+    expect(direct).toMatchObject({ path: 'direct', risk: 'low', reasons: ['isolated-low-risk'] })
+
+    // A declared auth path escalates a one-file, low-text change to ORC.
+    const escalated = await tool.execute(
+      { action: 'classify', request: 'Add a small helper', plannedFiles: 1, touchedPaths: ['src/auth/permissions.ts'] },
+      execFor(agent),
+    )
+    expect(escalated).toMatchObject({ path: 'orc', risk: 'high', reasons: ['high-impact'] })
+
+    // `start` threads the same facts into the durable classification.
+    const started = await tool.execute(
+      { action: 'start', request: 'Add a small helper', plannedFiles: 1, touchedPaths: ['src/payments/settle.ts'] },
+      execFor(agent),
+    )
+    expect(started).toMatchObject({ action: 'start', status: 'spec' })
+    expect(ports.journal.events[0]!.data).toMatchObject({
+      type: 'start',
+      risk: { path: 'orc', risk: 'high', reasons: ['high-impact'] },
+    })
   })
 
   it('refuses a peer tool call that tries to create a lead, create a peer, or complete', async () => {
