@@ -13,6 +13,11 @@
  *   they authorize. They record provider/CLI, model, effort, stage, risk,
  *   catalog and benchmark identities, and the selection reason — never a
  *   credential.
+ * - {@link OrcReportRejectionRecord} refusals, logged as `orc/report-rejected`
+ *   when a dispatched review or audit answer is not a valid report. They are
+ *   the visible half of a non-terminal refusal: the run keeps its phase and its
+ *   pending request, and the record says which stage was refused, why, and which
+ *   request a retry resumes.
  *
  * Reads go through DSH's public session-projection seam, never a direct session
  * event read: the `orc` projection folds the committed log, so a resumed or
@@ -38,13 +43,16 @@ import type { SessionProjectionStateMap } from '@deepseek-ai/dsh-session-project
 import { z, type ZodType } from 'zod'
 import type { RiskDecision } from '../domain/risk.js'
 import type { RouteDecision } from '../domain/routing.js'
-import { initialState, reduce, type OrcEvent, type OrcState } from '../domain/workflow.js'
+import { initialState, reduce, type OrcEvent, type OrcState, type RequestStage } from '../domain/workflow.js'
 
 /** The event-name prefix every durable ORC record is logged under. */
 export const ORC_EVENT_PREFIX = 'orc/'
 
 /** The event name of one durable route decision. */
 export const ORC_ROUTE_EVENT = 'orc/route'
+
+/** The event name of one durable refused report. */
+export const ORC_REPORT_REJECTED_EVENT = 'orc/report-rejected'
 
 /**
  * One durable route decision.
@@ -60,6 +68,33 @@ export interface OrcRouteRecord {
   /** When the decision was committed; supplied by the caller, never read here. */
   at: string
   decision: RouteDecision
+}
+
+/**
+ * One durable refusal of a review or audit answer.
+ *
+ * A malformed report is not a run failure: the run keeps its phase and its
+ * still-pending request, so the same stage can be dispatched again once the
+ * cause is fixed — the shape the routing refusals already have. The refusal is
+ * still committed, with the stage, the correlation of the request the retry
+ * resumes, and an ORC-owned reason, so the attempt is visible in the durable log
+ * instead of being silently retried.
+ *
+ * Like {@link OrcRouteRecord} it is not a reducer event: it records what the
+ * service observed, and folding it leaves the run state untouched.
+ */
+export interface OrcReportRejectionRecord {
+  version: 1
+  type: 'orc/report-rejected'
+  runId: string
+  /** When the refusal was committed; supplied by the caller, never read here. */
+  at: string
+  /** The stage whose answer was refused. */
+  stage: RequestStage
+  /** The correlation of the pending request a retry resumes. */
+  correlationId: string
+  /** ORC-owned, bounded, credential-free reason for the refusal. */
+  reason: string
 }
 
 /**
@@ -84,14 +119,14 @@ export interface OrcStartRecord extends Extract<OrcEvent, { type: 'start' }> {
 }
 
 /** Every durable ORC record. */
-export type OrcRecord = OrcEvent | OrcStartRecord | OrcRouteRecord
+export type OrcRecord = OrcEvent | OrcStartRecord | OrcRouteRecord | OrcReportRejectionRecord
 
 /** Whether one committed record is a start record carrying the classification. */
 export const hasStartRisk = (record: OrcRecord): record is OrcStartRecord & { risk: RiskDecision } =>
   record.type === 'start' && 'risk' in record && record.risk !== undefined
 
 /** The `orc/*` session event names one durable record can be logged under. */
-export type OrcEventName = `orc/${OrcEvent['type']}` | 'orc/route'
+export type OrcEventName = `orc/${OrcEvent['type']}` | 'orc/route' | 'orc/report-rejected'
 
 /**
  * One durable record as it is logged: the `orc/*` event name and its payload.
@@ -130,6 +165,8 @@ declare module '@deepseek-ai/dsh-session/types' {
     'orc/fail': Extract<OrcEvent, { type: 'fail' }>
     /** One durable route decision. */
     'orc/route': OrcRouteRecord
+    /** One durable refused review or audit report. */
+    'orc/report-rejected': OrcReportRejectionRecord
   }
 }
 
@@ -258,8 +295,17 @@ const ProjectionSchema = z.object({
 /** Whether one committed session event is a durable ORC record. */
 export const isOrcSessionEvent = (event: SessionEvent): boolean => event.type.startsWith(ORC_EVENT_PREFIX)
 
-/** The session event name one reducer event is logged under. */
-export const orcEventName = (event: OrcEvent): `orc/${OrcEvent['type']}` => `orc/${event.type}`
+/**
+ * The session event name one durable record is logged under.
+ *
+ * A reducer event's name is its own type under the `orc/` namespace; the two
+ * observation records carry their full event name as their type, exactly as
+ * they are logged.
+ */
+export const orcEventName = (record: OrcRecord): OrcEventName =>
+  record.type === ORC_ROUTE_EVENT || record.type === ORC_REPORT_REJECTED_EVENT
+    ? record.type
+    : `orc/${record.type}`
 
 /**
  * Fold one committed session event into the ORC projection state.
@@ -275,6 +321,10 @@ function applyRecord(state: OrcProjectionState, event: SessionEvent): OrcProject
   if (record.type === ORC_ROUTE_EVENT) {
     return { ...state, decisions: [...state.decisions, record.decision] }
   }
+  // A refused report is an observation, not a lifecycle transition: it is
+  // committed so the attempt is visible, and folding it leaves the run exactly
+  // as it was, so the pending request is still there for a retry to resume.
+  if (record.type === ORC_REPORT_REJECTED_EVENT) return state
   const run = reduce(state.run, record)
   // A start record written before the classification became durable carries no
   // risk; the state keeps the last one it saw instead of clearing it.
@@ -379,6 +429,7 @@ export class SessionOrcJournal implements OrcJournal {
     const prior = this.tails.get(key) ?? Promise.resolve()
     const next = prior.then(async () => {
       if (record.type === ORC_ROUTE_EVENT) session.append(ORC_ROUTE_EVENT, record)
+      else if (record.type === ORC_REPORT_REJECTED_EVENT) session.append(ORC_REPORT_REJECTED_EVENT, record)
       else session.append(orcEventName(record), record)
       await this.sessions.flush(session)
     })

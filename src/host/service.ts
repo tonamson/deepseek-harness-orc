@@ -30,6 +30,12 @@
  *   untouched and is thrown as an actionable error, so the user can change the
  *   settings or generate the missing evidence and dispatch the same stage
  *   again; every other routing failure blocks.
+ * - A malformed review or audit report is not a run failure either. ORC states
+ *   the report contract to the backend it dispatches to, and an answer that is
+ *   not a valid report is refused with an ORC-owned, bounded diagnostic: the run
+ *   keeps its phase and its pending request, the refusal is committed as
+ *   `orc/report-rejected`, and re-dispatching the same stage resumes that
+ *   request. A refusal is never a clean result and never unblocks completion.
  * - Every route decision is logged, credential-free, before the run it
  *   authorizes, and the committed decisions are what recovery reads back.
  * - Any child startup, route, or dispatch failure appends the reducer's only
@@ -43,7 +49,7 @@ import { SessionId, type Session } from '@deepseek-ai/dsh-session'
 import type { ContinuableStart, ContinuableStartSpec, SubagentCapabilities } from '@deepseek-ai/dsh-subagent'
 import { configRevision, routeKey } from '../domain/config.js'
 import type { BenchmarkSnapshot } from '../domain/evidence.js'
-import { parseReport } from '../domain/report.js'
+import { parseReport, ReportError } from '../domain/report.js'
 import type { RiskDecision } from '../domain/risk.js'
 import { selectRoute, RouteError, type RouteDecision } from '../domain/routing.js'
 import type {
@@ -56,9 +62,21 @@ import type {
   SessionMode,
   Stage,
 } from '../domain/types.js'
-import { WorkflowError, reduce, type Actor, type OrcEvent, type OrcState } from '../domain/workflow.js'
-import { CliError, type CliProbe } from './cli.js'
-import { ORC_ROUTE_EVENT, type OrcJournal, type OrcStartRecord } from './journal.js'
+import {
+  WorkflowError,
+  reduce,
+  type Actor,
+  type OrcEvent,
+  type OrcState,
+  type RequestStage,
+} from '../domain/workflow.js'
+import { CliError, safeExcerpt, type CliProbe } from './cli.js'
+import {
+  ORC_REPORT_REJECTED_EVENT,
+  ORC_ROUTE_EVENT,
+  type OrcJournal,
+  type OrcStartRecord,
+} from './journal.js'
 import type { ConnectionResult } from './provider.js'
 import type { OrcSettingsBridge } from './settings.js'
 
@@ -80,6 +98,63 @@ export const ORC_LEAD_LABEL = 'ORC lead'
 
 /** The label ORC gives one peer child. */
 export const orcPeerLabel = (name: string): string => `ORC peer ${name}`
+
+/**
+ * The report contract ORC states to every backend it dispatches a review or
+ * audit to.
+ *
+ * ORC owns the contract — {@link parseReport} accepts nothing else — so ORC is
+ * the one that has to state it: a backend asked only for "a review" answers in
+ * prose, and prose is a malformed report. The caller's prompt stays the work;
+ * this text is appended by the service, so the Supervisor never has to
+ * reproduce a schema that could drift from the parser.
+ */
+export const REPORT_CONTRACT = `## Report format (required)
+Answer with exactly one JSON object and nothing else: no prose, no summary, no markdown, no code fences, and no commentary before or after it.
+
+The shape is:
+{"status":"clean","findings":[]}
+
+- "status" is exactly "clean" or "findings".
+- "findings" is an array of finding objects. "clean" requires it to be empty; "findings" requires at least one finding.
+- Every finding has exactly these six fields and no others:
+  - "id": a unique, non-empty string within this report.
+  - "severity": exactly one of "critical", "high", "medium", "low", "info".
+  - "file": the non-empty path of the file the finding is about.
+  - "line": the non-negative integer line number.
+  - "evidence": non-empty text describing what is wrong.
+  - "remediation": non-empty text describing what must change.
+- "critical", "high", and "medium" findings block the run until they are fixed and re-reviewed; "low" and "info" do not block.
+
+One finding looks like this:
+{"status":"findings","findings":[{"id":"F-1","severity":"high","file":"src/pay.ts","line":12,"evidence":"the amount is credited twice","remediation":"settle the payment once"}]}
+
+Return only that JSON object.`
+
+/**
+ * The exact prompt one review or audit dispatch sends.
+ *
+ * The caller's prompt is the work; ORC appends the report contract it will
+ * parse the answer against. `spec`, `plan`, and `code` answers are not parsed
+ * as reports, so those stages receive the caller's prompt unchanged.
+ */
+export const reportPrompt = (prompt: string): string => `${prompt}\n\n${REPORT_CONTRACT}`
+
+/** The prompt one analysis stage dispatch sends. */
+const stagePrompt = (stage: AnalysisStage, prompt: string): string =>
+  stage === 'review' || stage === 'audit' ? reportPrompt(prompt) : prompt
+
+/**
+ * One ORC-owned, bounded reason for a refused report.
+ *
+ * The parser's own refusals are already ORC-owned, but a refusal may quote a
+ * model-supplied field verbatim, so every reason is reduced through the same
+ * redaction and length bound as a raw answer.
+ */
+function malformedReason(error: unknown): string {
+  const reason = error instanceof Error ? error.message.replace(/^blocking:\s*/, '') : 'the report is malformed'
+  return `the report is malformed: ${safeExcerpt(reason)}`
+}
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -568,12 +643,12 @@ export class OrcService {
       if (pending === undefined) {
         await this.commit(session, this.requestEvent(state, analysis, correlationId))
       }
-      const text = await this.runRoute(session, runId, decision, prompt, signal)
+      const text = await this.runRoute(session, runId, decision, stagePrompt(analysis, prompt), signal)
       let report: unknown
       try {
         report = this.stageReport(analysis, text)
       } catch (error) {
-        await this.block(session, runId, `${analysis} report blocked: ${safeReason(error)}`)
+        await this.rejectReport(session, runId, analysis, correlationId, error)
         throw error
       }
       await this.commit(session, this.resultEvent(runId, analysis, correlationId, report))
@@ -670,15 +745,20 @@ export class OrcService {
       this.requireTaskEvidence(state, `final ${stage}`)
       // One round per committed request for this gate, so a re-review after a
       // fix cycle allocates a fresh identity instead of colliding with the
-      // first. A gate whose request was committed but whose result never landed
-      // has already blocked the run, so there is no pending request to resume.
-      const round = state.requests.filter(request => request.stage === `final-${stage}`).length + 1
-      const correlationId = `final-${stage}:${runId}:${round}`
+      // first. A gate whose answer was refused has already committed its
+      // request and left it pending, so this dispatch resumes that request —
+      // with its own correlation id — instead of opening a second round.
+      const gate: RequestStage = stage === 'review' ? 'final-review' : 'final-audit'
+      const pending = state.requests.find(request => request.stage === gate && !request.consumed)
+      const round = state.requests.filter(request => request.stage === gate).length + 1
+      const correlationId = pending?.correlationId ?? `${gate}:${runId}:${round}`
       const request: OrcEvent = stage === 'review'
         ? { ...this.envelope(runId, 'supervisor', supervisor.id), type: 'final-review-request', correlationId }
         : { ...this.envelope(runId, 'supervisor', supervisor.id), type: 'final-audit-request', correlationId }
-      // Refuse a wrong phase (or an unsettled task) before logging anything.
-      reduce(state, request)
+      // Refuse a wrong phase (or an unsettled task) before logging anything. A
+      // resumed request was validated when it was committed, and the phase it
+      // set is the phase the run still holds.
+      if (pending === undefined) reduce(state, request)
       const config = this.ports.settings.config()
       const prior = stage === 'audit' ? this.lastReviewDecision(session) : undefined
       let decision: RouteDecision
@@ -696,13 +776,13 @@ export class OrcService {
         at: this.now(),
         decision,
       })
-      await this.commit(session, request)
-      const text = await this.runRoute(session, runId, decision, prompt, signal)
+      if (pending === undefined) await this.commit(session, request)
+      const text = await this.runRoute(session, runId, decision, stagePrompt(stage, prompt), signal)
       let report: unknown
       try {
         report = this.stageReport(stage, text)
       } catch (error) {
-        await this.block(session, runId, `final ${stage} report blocked: ${safeReason(error)}`)
+        await this.rejectReport(session, runId, gate, correlationId, error)
         throw error
       }
       return await this.commit(
@@ -959,13 +1039,52 @@ export class OrcService {
    * Parse one review/audit stage's accepted text.
    *
    * The text must be exactly the report JSON: a fenced, padded, or otherwise
-   * unparseable answer is a malformed report, and a malformed report blocks.
+   * unparseable answer is a malformed report. Both the JSON read and the schema
+   * check are wrapped here, so a refusal is always an ORC-owned
+   * {@link ReportError} carrying a bounded, redacted excerpt instead of a raw
+   * `SyntaxError` quoting the model's whole answer.
    */
   private stageReport(stage: AnalysisStage, text: string): unknown {
     if (stage !== 'review' && stage !== 'audit') return undefined
-    const raw: unknown = JSON.parse(text)
-    parseReport(raw, stage)
+    let raw: unknown
+    try {
+      raw = JSON.parse(text)
+    } catch {
+      throw new ReportError(`the answer is not the report JSON: ${safeExcerpt(text)}`)
+    }
+    try {
+      parseReport(raw, stage)
+    } catch (error) {
+      throw new ReportError(malformedReason(error))
+    }
     return raw
+  }
+
+  /**
+   * Record one refused report without touching the lifecycle.
+   *
+   * A malformed report is a refusal, not a failure: the run keeps its phase and
+   * the still-pending request the retry resumes, and only this observation
+   * record is committed. That is what makes the refusal recoverable while
+   * keeping it visible, and it is why the refusal can never be mistaken for a
+   * result: nothing consumes the request and nothing advances the phase.
+   */
+  private async rejectReport(
+    session: Session,
+    runId: string,
+    stage: RequestStage,
+    correlationId: string,
+    error: unknown,
+  ): Promise<void> {
+    await this.ports.journal.commit(session, {
+      version: 1,
+      type: ORC_REPORT_REJECTED_EVENT,
+      runId,
+      at: this.now(),
+      stage,
+      correlationId,
+      reason: safeReason(error),
+    })
   }
 
   /** Verify a route and dispatch one prompt through its own backend. */

@@ -85,7 +85,9 @@ Before implementing, the Supervisor classifies the request:
 Once ORC starts, review and security audit are separate stages. Critical, high,
 and medium findings block until they are fixed and re-reviewed. A failed,
 malformed, missing, or unavailable report is blocking and is never represented
-as a clean audit.
+as a clean audit: ORC states the required report format to each review and audit
+backend it dispatches to, and a malformed report leaves the run blocked in its
+stage, so the same stage can be dispatched again once the cause is fixed.
 
 ## Settings
 

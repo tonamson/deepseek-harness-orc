@@ -166,6 +166,38 @@ describe('real DSH session durability', () => {
     expect(state.requests).toEqual([{ correlationId: 'spec:1:abc', stage: 'spec', consumed: false }])
   })
 
+  it('commits a refused report as a durable observation that leaves the run resumable', async () => {
+    const { ctx, store, projections } = fakeDshSessionServices()
+    const install = installOrcJournal(ctx)
+    const session = store.create(SessionId('orc-refusal'))
+    const base = { version: 1 as const, runId: 'orc-refusal', actorId: 'orc-refusal', actor: 'supervisor' as const, at: FAKE_NOW }
+    await install.journal.commit(session, { ...base, type: 'start' })
+    await install.journal.commit(session, { ...base, type: 'spec-request', correlationId: 'spec:1:abc' })
+    await install.journal.commit(session, {
+      version: 1,
+      type: 'orc/report-rejected',
+      runId: 'orc-refusal',
+      at: FAKE_NOW,
+      stage: 'review',
+      correlationId: 'review:1:abc',
+      reason: 'blocking: the answer is not the report JSON: No <path> issue found',
+    })
+
+    // The refusal reaches the supervisor's exact session, through the real
+    // journal and the real projection.
+    expect(session.snapshotEvents().map(event => event.type)).toEqual([
+      'orc/start',
+      'orc/spec-request',
+      'orc/report-rejected',
+    ])
+    // It is an observation, not a lifecycle transition: the folded run keeps
+    // its phase and its pending request, so a retry can still resume it.
+    expect(projections.stateOf(session, 'orc')?.run).toMatchObject({ phase: 'spec' })
+    expect(install.journal.state(session).requests).toEqual([
+      { correlationId: 'spec:1:abc', stage: 'spec', consumed: false },
+    ])
+  })
+
   it('resumes a pending request through the real journal without duplicating it', async () => {
     const ports = fakePorts()
     const services = fakeDshSessionServices()

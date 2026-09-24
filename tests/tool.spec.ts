@@ -13,7 +13,7 @@ import { describe, expect, it } from 'vitest'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { parseConfig } from '../src/domain/config.js'
-import { ORC_LEAD_LABEL, OrcService } from '../src/host/service.js'
+import { ORC_LEAD_LABEL, OrcService, reportPrompt } from '../src/host/service.js'
 import { installOrcTool, ORC_POLICY, ORC_SECTION_NAME } from '../src/host/tool.js'
 import { fakePorts, HIGH_RISK, type FakePorts, type PreStepMessage } from './fixtures/ports.js'
 
@@ -237,6 +237,12 @@ describe('pre-step gate', () => {
     expect(ORC_POLICY).toContain('governs exactly one thing: an explicit `dispatch` with `stage: "code"`')
     expect(ORC_POLICY).toContain('inherit this session\'s live provider, model, and effort')
     expect(ORC_POLICY).toContain('`always` mode the ORC run opens for every admitted request')
+    // R37: ORC states the report contract itself, and a malformed report leaves
+    // the stage re-dispatchable instead of failing the run.
+    expect(ORC_POLICY).toContain('ORC states the exact report format to the backend it dispatches to')
+    expect(ORC_POLICY).toContain('a malformed report leaves the run blocked in its stage, so the same stage can be dispatched again')
+    // The policy points at the service's contract instead of restating it.
+    expect(ORC_POLICY).not.toContain('"remediation"')
   })
 
   it('does not open a nested run for a member of an existing run', async () => {
@@ -359,8 +365,9 @@ describe('tool actions', () => {
 
     const value = await tool.execute({ action: 'final-review', prompt: 'final branch review' }, execFor(agent))
     expect(value).toMatchObject({ action: 'final-review', finalReview: 'clean' })
-    // The selected route really received the prompt.
-    expect(ports.clis.runs.filter(run => run.prompt === 'final branch review')).toHaveLength(1)
+    // The selected route really received the prompt, with ORC's report contract
+    // appended by the service.
+    expect(ports.clis.runs.filter(run => run.prompt === reportPrompt('final branch review'))).toHaveLength(1)
   })
 
   it('refuses a tool call without a calling agent', async () => {
@@ -415,7 +422,7 @@ describe('recorded session snapshot', () => {
     expect(snapshot).toEqual(JSON.parse(readFileSync(SNAPSHOT_PATH, 'utf8')))
   })
 
-  it('records a blocked review result in the snapshot failure path', async () => {
+  it('records a refused review result in the snapshot failure path', async () => {
     const ports = fakePorts()
     const service = new OrcService(ports)
     const { agent } = install(ports, service)
@@ -435,10 +442,15 @@ describe('recorded session snapshot', () => {
       failure = error instanceof Error ? error.message : String(error)
     }
     expect(failure).toMatch(/blocking/)
-    expect(service.state(agent).phase).toBe('failed')
+    // A contradictory report is refused, not normalized: the run keeps the
+    // phase and its pending request, the refusal is durable and visible, and
+    // completion is still refused.
+    expect(service.state(agent).phase).toBe('review')
     expect(ports.journal.events.at(-1)!.data).toMatchObject({
-      type: 'fail',
-      reason: expect.stringMatching(/^review report blocked/),
+      type: 'orc/report-rejected',
+      stage: 'review',
+      reason: expect.stringMatching(/^blocking: the report is malformed/),
     })
+    await expect(service.complete(agent)).rejects.toThrow(/blocking/)
   })
 })

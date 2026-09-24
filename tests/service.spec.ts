@@ -15,11 +15,12 @@ import { RouteError } from '../src/domain/routing.js'
 import type { RouteDecision } from '../src/domain/routing.js'
 import type { OrcStartRecord } from '../src/host/journal.js'
 import { OrcService } from '../src/host/service.js'
-import { ORC_LEAD_LABEL } from '../src/host/service.js'
+import { ORC_LEAD_LABEL, REPORT_CONTRACT, reportPrompt } from '../src/host/service.js'
 import {
   FAKE_NOW,
   fakePorts,
   HIGH_RISK,
+  rawAnswer,
   SUPERVISOR_ID,
   type FakePorts,
 } from './fixtures/ports.js'
@@ -581,7 +582,12 @@ describe('blocking failures and gates', () => {
 
     await expect(svc.dispatch(ports.supervisor, 'review', 'review task-1', signal)).rejects.toThrow(/blocking/)
     expect(eventNames(ports)).not.toContain('orc/review-result')
-    expect(ports.journal.events.at(-1)!.type).toBe('orc/fail')
+    // The refusal is durable and visible, but it is not a run failure: the
+    // contradictory report is neither normalized to clean nor recorded, the run
+    // keeps the phase and the pending request, and completion still refuses.
+    expect(ports.journal.events.at(-1)!.type).toBe('orc/report-rejected')
+    expect(svc.state(ports.supervisor).phase).toBe('review')
+    expect(svc.state(ports.supervisor).findings).toEqual([])
     await expect(svc.complete(ports.supervisor)).rejects.toThrow(/blocking/)
   })
 
@@ -665,8 +671,8 @@ describe('blocking failures and gates', () => {
     expect(finalReview).toMatchObject({ stage: 'review', risk: { risk: 'high' } })
     expect(finalAudit).toMatchObject({ stage: 'audit', risk: { risk: 'high' } })
     expect(routeBackend(finalAudit.route)).not.toBe(routeBackend(finalReview.route))
-    expect(ports.clis.runs.filter(run => run.prompt === 'final branch review')).toHaveLength(1)
-    expect(ports.clis.runs.filter(run => run.prompt === 'final branch audit')).toHaveLength(1)
+    expect(ports.clis.runs.filter(run => run.prompt === reportPrompt('final branch review'))).toHaveLength(1)
+    expect(ports.clis.runs.filter(run => run.prompt === reportPrompt('final branch audit'))).toHaveLength(1)
   })
 
   it('records only the report the final gate dispatch produced', async () => {
@@ -696,7 +702,7 @@ describe('blocking failures and gates', () => {
     await expect(svc.complete(ports.supervisor)).resolves.toMatchObject({ phase: 'completed' })
   })
 
-  it('blocks a malformed final gate answer instead of normalizing it', async () => {
+  it('blocks a malformed final gate answer instead of normalizing it, and re-runs that gate', async () => {
     const ports = fakePorts()
     const svc = new OrcService(ports)
     const { peer } = await toReview(ports, svc)
@@ -708,8 +714,19 @@ describe('blocking failures and gates', () => {
     // The audit's route answered with something that is not a report.
     ports.reports.push('not a report')
     await expect(svc.finalBranchAudit(ports.supervisor, 'final branch audit', signal)).rejects.toThrow(/blocking/)
-    expect(ports.journal.events.at(-1)!.type).toBe('orc/fail')
-    expect(svc.state(ports.supervisor).phase).toBe('failed')
+    expect(ports.journal.events.at(-1)!.type).toBe('orc/report-rejected')
+    expect(svc.state(ports.supervisor).phase).toBe('final-audit')
+    expect(svc.state(ports.supervisor).finalAudit).toBe('none')
+    await expect(svc.complete(ports.supervisor)).rejects.toThrow(/blocking/)
+
+    // The refused gate is re-runnable: the retry resumes the pending request
+    // instead of opening a second round, and the clean answer completes it.
+    ports.reports.push(cleanReport)
+    await expect(svc.finalBranchAudit(ports.supervisor, 'final branch audit', signal))
+      .resolves.toMatchObject({ finalAudit: 'clean' })
+    expect(eventNames(ports).filter(name => name === 'orc/final-audit-request')).toHaveLength(1)
+    expect(eventNames(ports).filter(name => name === 'orc/final-audit-result')).toHaveLength(1)
+    await expect(svc.complete(ports.supervisor)).resolves.toMatchObject({ phase: 'completed' })
     expect(peer.id).toBeDefined()
   })
 
@@ -796,6 +813,163 @@ describe('blocking failures and gates', () => {
     expect(first.tasks.map(task => task.id)).toEqual(['task-1', 'task-2'])
     expect(second.tasks.map(task => task.id)).toEqual(['task-1', 'task-2', 'task-3'])
     expect(ports.journal.events.filter(event => event.type === 'orc/task-start')).toHaveLength(3)
+  })
+})
+
+describe('report contract and malformed-report recovery', () => {
+  it('states the report contract to a dispatched review and audit', async () => {
+    const ports = fakePorts()
+    const svc = new OrcService(ports)
+    await toReview(ports, svc)
+    ports.reports.push(cleanReport, cleanReport)
+    await svc.dispatch(ports.supervisor, 'review', 'review task-1', signal)
+    await svc.dispatch(ports.supervisor, 'audit', 'audit task-1', signal)
+
+    const review = ports.clis.runs.find(run => run.prompt.startsWith('review task-1'))!
+    const audit = ports.clis.runs.find(run => run.prompt.startsWith('audit task-1'))!
+    // The caller's prompt is still the work; ORC appends the contract it parses.
+    expect(review.prompt).toBe(reportPrompt('review task-1'))
+    expect(audit.prompt).toBe(reportPrompt('audit task-1'))
+
+    // The contract names the exact shape, statuses, finding fields, severities,
+    // and blocking rule the parser enforces — not a vague instruction.
+    for (const required of [
+      '{"status":"clean","findings":[]}',
+      'exactly one JSON object and nothing else',
+      '"status" is exactly "clean" or "findings"',
+      '"findings" is an array of finding objects',
+      'exactly these six fields',
+      '"id": a unique, non-empty string within this report',
+      '"severity": exactly one of "critical", "high", "medium", "low", "info"',
+      '"file": the non-empty path',
+      '"line": the non-negative integer line number',
+      '"evidence": non-empty text describing what is wrong',
+      '"remediation": non-empty text describing what must change',
+      '"critical", "high", and "medium" findings block the run until they are fixed and re-reviewed',
+      'no code fences',
+    ]) {
+      expect(REPORT_CONTRACT).toContain(required)
+      expect(review.prompt).toContain(required)
+      expect(audit.prompt).toContain(required)
+    }
+  })
+
+  it('does not state the report contract to spec, plan, or code', async () => {
+    const ports = fakePorts()
+    const svc = new OrcService(ports)
+    await svc.start(ports.supervisor, HIGH_RISK)
+    await svc.dispatch(ports.supervisor, 'spec', 'spec input', signal)
+    await svc.dispatch(ports.supervisor, 'plan', 'plan input', signal)
+    await svc.dispatch(ports.supervisor, 'code', 'code input', signal)
+
+    // Those three answers are not parsed as reports, so the backend receives
+    // the caller's prompt byte-for-byte.
+    expect(ports.providers.runs.map(run => run.prompt)).toEqual(['spec input', 'plan input', 'code input'])
+    expect(ports.clis.runs).toEqual([])
+    for (const run of ports.providers.runs) expect(run.prompt).not.toContain(REPORT_CONTRACT)
+  })
+
+  it('turns a prose answer into an ORC-owned blocking error with a bounded excerpt', async () => {
+    const ports = fakePorts()
+    const svc = new OrcService(ports)
+    await toReview(ports, svc)
+    const tail = 'TAIL-MARKER-THAT-MUST-NOT-SURVIVE'
+    ports.reports.push(rawAnswer(`No payment issue found in src/pay.ts:12. ${'detail '.repeat(80)}${tail}`))
+
+    const failure = await svc.dispatch(ports.supervisor, 'review', 'review task-1', signal)
+      .then(() => undefined, (error: unknown) => error)
+
+    // ORC owns the refusal: not a raw SyntaxError quoting the model's answer.
+    expect(failure).toBeInstanceOf(Error)
+    expect(failure).not.toBeInstanceOf(SyntaxError)
+    expect((failure as Error).name).toBe('ReportError')
+    expect((failure as Error).message).toMatch(/^blocking: the answer is not the report JSON: /)
+    // The excerpt is bounded and redacted: the beginning survives, the path is
+    // replaced, and the tail past the bound does not.
+    expect((failure as Error).message).toContain('No payment issue found')
+    expect((failure as Error).message).toContain('<path>')
+    expect((failure as Error).message).not.toContain(tail)
+    expect((failure as Error).message.length).toBeLessThan(400)
+    // The durable record is bounded the same way.
+    const rejection = ports.journal.events.at(-1)!
+    expect(rejection.type).toBe('orc/report-rejected')
+    expect(JSON.stringify(rejection)).not.toContain(tail)
+    expect(JSON.stringify(rejection).length).toBeLessThan(700)
+  })
+
+  it('blocks a schema-violating JSON report with an ORC-owned error', async () => {
+    const ports = fakePorts()
+    const svc = new OrcService(ports)
+    await toReview(ports, svc)
+    const finding = (id: string): Record<string, unknown> => ({
+      id,
+      severity: 'high',
+      file: 'src/pay.ts',
+      line: 12,
+      evidence: 'double credit',
+      remediation: 'settle once',
+    })
+    const violations: [string, unknown][] = [
+      ['an unknown report field', { status: 'clean', findings: [], summary: 'all good' }],
+      ['an unknown finding field', { status: 'findings', findings: [{ ...finding('F-1'), note: 'extra' }] }],
+      ['an invalid severity', { status: 'findings', findings: [{ ...finding('F-1'), severity: 'blocker' }] }],
+      ['empty evidence', { status: 'findings', findings: [{ ...finding('F-1'), evidence: '   ' }] }],
+      ['duplicate finding ids', { status: 'findings', findings: [finding('F-1'), finding('F-1')] }],
+    ]
+
+    for (const [name, report] of violations) {
+      ports.reports.push(report)
+      const failure = await svc.dispatch(ports.supervisor, 'review', 'review task-1', signal)
+        .then(() => undefined, (error: unknown) => error)
+      expect(failure, name).toBeInstanceOf(Error)
+      expect((failure as Error).name, name).toBe('ReportError')
+      expect((failure as Error).message, name).toMatch(/^blocking: the report is malformed: /)
+      expect(ports.journal.events.at(-1)!.type, name).toBe('orc/report-rejected')
+      expect(eventNames(ports), name).not.toContain('orc/review-result')
+      expect(svc.state(ports.supervisor).phase, name).toBe('review')
+    }
+
+    // None of the refusals recorded a finding or advanced the gate.
+    expect(svc.state(ports.supervisor).findings).toEqual([])
+    expect(svc.state(ports.supervisor).taskGate).toBe('open')
+  })
+
+  it('recovers from a malformed report: the run stays blocked, and a well-formed re-dispatch advances it', async () => {
+    const ports = fakePorts()
+    const svc = new OrcService(ports)
+    await toReview(ports, svc)
+
+    // The backend answers the question it was asked, in prose.
+    ports.reports.push(rawAnswer('No src/pay.ts issue found; the change looks good to me.'))
+    await expect(svc.dispatch(ports.supervisor, 'review', 'review task-1', signal)).rejects.toThrow(/blocking/)
+
+    // The refused attempt is durably visible.
+    const rejection = ports.journal.events.at(-1)!
+    expect(rejection.type).toBe('orc/report-rejected')
+    expect(rejection.data).toMatchObject({
+      type: 'orc/report-rejected',
+      stage: 'review',
+      correlationId: expect.stringMatching(/^review:1:/),
+      reason: expect.stringMatching(/^blocking: the answer is not the report JSON/),
+    })
+
+    // The run is still blocked: nothing was recorded as a review result, the
+    // phase did not advance, and the next stage stays out of reach.
+    expect(eventNames(ports)).not.toContain('orc/review-result')
+    expect(svc.state(ports.supervisor).phase).toBe('review')
+    await expect(svc.dispatch(ports.supervisor, 'audit', 'audit task-1', signal)).rejects.toThrow(/phase/)
+    await expect(svc.complete(ports.supervisor)).rejects.toThrow(/blocking/)
+
+    // The same stage, dispatched again with a well-formed report, advances.
+    ports.reports.push(cleanReport)
+    await expect(svc.dispatch(ports.supervisor, 'review', 'review task-1', signal))
+      .resolves.toMatchObject({ phase: 'audit' })
+
+    // The retry resumed the pending request instead of opening a second one,
+    // while each attempt was still routed.
+    expect(eventNames(ports).filter(name => name === 'orc/review-request')).toHaveLength(1)
+    expect(eventNames(ports).filter(name => name === 'orc/review-result')).toHaveLength(1)
+    expect(routeDecisions(ports).filter(decision => decision.stage === 'review')).toHaveLength(2)
   })
 })
 

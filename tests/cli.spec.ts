@@ -21,6 +21,7 @@ import {
   codexArgv,
   parseCliVersion,
   safeDiagnostic,
+  safeExcerpt,
   type CliSubprocessPort,
 } from '../src/host/cli.js'
 
@@ -561,6 +562,20 @@ it('keeps the selected executable and redacts every other path', () => {
   expect(safeDiagnostic('cannot start /usr/bin/codex', '/usr/bin/codex')).toBe('cannot start /usr/bin/codex')
   expect(safeDiagnostic('\u001b[31mboom\u001b[0m')).toBe('boom')
   expect(safeDiagnostic('Bearer abcdefghijklmnop')).toBe('<redacted>')
+})
+
+it('bounds an excerpt of raw output for a failure diagnostic', () => {
+  // R37: an unparseable stage answer is surfaced as a bounded, redacted
+  // excerpt, never as the model's whole reply.
+  const tail = 'TAIL-MARKER'
+  const excerpt = safeExcerpt(`sk-test-secret at /Users/someone/notes.md\n\n${'word '.repeat(200)}${tail}`)
+  expect(excerpt).toContain('<redacted>')
+  expect(excerpt).toContain('<path>')
+  expect(excerpt).not.toContain(tail)
+  expect(excerpt).not.toContain('\n')
+  expect(excerpt.length).toBeLessThanOrEqual(201)
+  // Short answers are carried whole.
+  expect(safeExcerpt('No findings')).toBe('No findings')
 })
 
 it('returns a credential-free probe for an API-key account', async () => {

@@ -54,7 +54,7 @@ Classify every request before implementing it, and use the \`orc\` tool to recor
 
 Once ORC starts, this session is the Supervisor of an ORC run: the run's Lead owns tasks, reviews, and fixes; Peers implement. The ORC service validates role authority, phase order, task settlement, review and audit results, fixes, and completion — a phase or authority refusal is final until the state that caused it changes.
 The Lead and Peer children inherit this session's live provider, model, and effort, because a DSH child agent can only be given a DSH provider route. The configured **code route** — including the DeepSeek Flash v4.1 high default — therefore governs exactly one thing: an explicit \`dispatch\` with \`stage: "code"\`, which ORC routes and runs on that route. It does not move the Supervisor or the hierarchy.
-Review and security audit are separate stages, and the final branch review and audit are separate gates that ORC routes and dispatches itself. Every one of them runs on a route ORC selects; a report you write is never accepted in place of the report the selected backend produced. Critical, high, and medium findings block until they are fixed and re-reviewed. A failed, malformed, missing, or unavailable review or audit is blocking and is never a clean result.`
+Review and security audit are separate stages, and the final branch review and audit are separate gates that ORC routes and dispatches itself. Every one of them runs on a route ORC selects, and ORC states the exact report format to the backend it dispatches to; a report you write is never accepted in place of the report the selected backend produced. Critical, high, and medium findings block until they are fixed and re-reviewed. A failed, malformed, missing, or unavailable review or audit is blocking and is never a clean result: a malformed report leaves the run blocked in its stage, so the same stage can be dispatched again once the cause is fixed.`
 
 /** Every action the tool accepts. */
 const ACTIONS = [
@@ -112,7 +112,10 @@ const ORC_PARAMETERS = {
     enum: ['code', 'spec', 'plan', 'review', 'audit'],
     description: 'dispatch: the stage to route and run.',
   },
-  prompt: { type: 'string', description: 'dispatch/final-review/final-audit: the work the stage receives.' },
+  prompt: {
+    type: 'string',
+    description: 'dispatch/final-review/final-audit: the work the stage receives; ORC appends the report contract to a review or audit dispatch.',
+  },
   reason: { type: 'string', description: 'dismiss: why the finding does not block.' },
 } as const satisfies ParameterSchemaSpec
 

@@ -198,6 +198,22 @@ export function safeDiagnostic(text: string, executable = ''): string {
   return safe.trim()
 }
 
+/** How much redacted text a bounded excerpt may carry. */
+const EXCERPT_LIMIT = 200
+
+/**
+ * A short, safe excerpt of raw backend output for a failure diagnostic.
+ *
+ * Same redaction discipline as {@link safeDiagnostic}, plus a hard length bound
+ * and whitespace collapsing, for the one place a raw answer must never be
+ * surfaced whole: an unparseable stage answer. Mirrors the excerpt
+ * `scripts/benchmark.mjs` builds for a provider failure.
+ */
+export function safeExcerpt(text: string, executable = ''): string {
+  const safe = safeDiagnostic(text, executable).replace(/\s+/g, ' ')
+  return safe.length > EXCERPT_LIMIT ? `${safe.slice(0, EXCERPT_LIMIT)}…` : safe
+}
+
 /** Compare three numeric version components; never a string or locale compare. */
 function compareComponents(a: readonly number[], b: readonly number[]): number {
   for (let index = 0; index < 3; index += 1) {

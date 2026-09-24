@@ -19,7 +19,10 @@
  *
  * Stage output is a FIFO queue: a test pushes the report the next review or
  * audit run must return, and any stage run pops one entry, so the brief's
- * `ports.reports.push(mediumReport)` sequence drives the fake directly.
+ * `ports.reports.push(mediumReport)` sequence drives the fake directly. A
+ * queued value is JSON-encoded, exactly as a real adapter must answer to return
+ * a report; {@link rawAnswer} wraps text a test wants returned verbatim, which
+ * is how a prose answer to a review is modelled.
  */
 
 import { Context } from '@deepseek-ai/cordis'
@@ -71,6 +74,27 @@ export const SUPERVISOR_ID = 'session-supervisor'
 
 /** The result a stage run returns when the report queue is empty. */
 export const DEFAULT_STAGE_OUTPUT = 'stage output'
+
+/**
+ * Raw backend text one fake stage run returns verbatim.
+ *
+ * Every other queued value is JSON-encoded, because that is the only way a real
+ * adapter can hand ORC a report. A wrapped answer models the case the queue
+ * otherwise cannot express: a backend that answers the question it was asked in
+ * prose.
+ */
+export class RawAnswer {
+  constructor(readonly text: string) {}
+}
+
+/** Wrap raw backend text so the next fake stage run returns it verbatim. */
+export const rawAnswer = (text: string): RawAnswer => new RawAnswer(text)
+
+/** The exact text one fake stage run returns for the next queued answer. */
+const stageAnswer = (reports: unknown[]): string => {
+  const next = reports.shift() ?? DEFAULT_STAGE_OUTPUT
+  return next instanceof RawAnswer ? next.text : JSON.stringify(next)
+}
 
 // --------------------------------------------------------------------- agents
 
@@ -228,7 +252,10 @@ export function fakeJournal(seed: OrcJournalRecord[] = []): FakeJournal {
       const list = records.get(runId) ?? []
       list.push(record.data)
       records.set(runId, list)
-      if (record.data.type === 'orc/route') continue
+      // The two observation records carry no lifecycle transition: a route
+      // decision is a routing input and a refused report leaves the run exactly
+      // as it was, with its pending request still resumable.
+      if (record.data.type === 'orc/route' || record.data.type === 'orc/report-rejected') continue
       // The durable classification lives on the start record, exactly as the
       // session projection folds it, so a recovery journal exposes it too.
       if (hasStartRisk(record.data)) risks.set(runId, record.data.risk)
@@ -518,7 +545,7 @@ function fakeProviders(deps: { reports: unknown[] }): FakeProviders {
       if (!test.ok || test.routeKey !== routeKeyOf(route) || test.configRevision !== revision) {
         throw new Error(`stale connection test for ${routeKeyOf(route)}`)
       }
-      return JSON.stringify(deps.reports.shift() ?? DEFAULT_STAGE_OUTPUT)
+      return stageAnswer(deps.reports)
     },
   }
 }
@@ -590,7 +617,7 @@ function fakeClis(deps: { reports: unknown[]; now: string }): FakeClis {
       if (recorded.path !== path) {
         throw new Error(`stale ${route.cli} probe for ${routeKeyOf(route)}: probed ${String(recorded.path)}, running ${String(path)}`)
       }
-      return JSON.stringify(deps.reports.shift() ?? DEFAULT_STAGE_OUTPUT)
+      return stageAnswer(deps.reports)
     },
   }
 }
