@@ -13,6 +13,7 @@ import { routeKey } from '../src/domain/config.js'
 import { parseConfig } from '../src/domain/config.js'
 import { RouteError } from '../src/domain/routing.js'
 import type { RouteDecision } from '../src/domain/routing.js'
+import { canComplete } from '../src/domain/workflow.js'
 import type { OrcStartRecord } from '../src/host/journal.js'
 import { OrcService } from '../src/host/service.js'
 import { MAX_STATED_FINDING_IDS, ORC_LEAD_LABEL, REPORT_CONTRACT, reportPrompt } from '../src/host/service.js'
@@ -1521,4 +1522,66 @@ it('keeps the answer durable when delivery fails and re-delivers the recorded an
   expect(ports.subagents.sent).toHaveLength(1)
   expect(ports.subagents.sent[0]?.text).toContain('postgres')
   expect(ports.subagents.sent[0]?.text).not.toContain('mysql')
+})
+
+it('drives the whole question loop: gates refuse, the answer is delivered, and the run resumes', async () => {
+  const ports = fakePorts()
+  const service = new OrcService(ports)
+  await toImplement(ports, service)
+  const lead = await service.createLead(ports.supervisor)
+  const peer = await service.createPeer(lead, 'peer-1')
+  await service.startTask(lead, peer, 'task-1')
+
+  const raised = await service.raiseQuestion(peer, 'task-1', 'which database?')
+  const questionId = raised.questions[0]?.id
+  expect(questionId).toBeDefined()
+
+  // Each parked gate refuses for the question's own reason. The service has no
+  // `reviewRequest`; a review is opened by dispatching the review stage, which
+  // commits the `review-request` as the run's lead.
+  await expect(service.settleTask(peer, 'task-1')).rejects.toThrow(/task task-1 has an open question/)
+  await expect(service.dispatch(ports.supervisor, 'review', 'review task-1', signal))
+    .rejects.toThrow(/review cannot start while a question is open/)
+  await expect(service.finalBranchReview(ports.supervisor, 'final branch review', signal))
+    .rejects.toThrow(/the final branch review requires every question answered/)
+
+  // Completion refuses too. `completionBlockers` is not exported, so the
+  // question's contribution is isolated instead: a copy of the parked state
+  // with every other completion conjunct satisfied still cannot complete, and
+  // the open question is the only condition left unsatisfied.
+  const parked = service.state(ports.supervisor)
+  expect(canComplete(parked)).toBe(false)
+  expect(canComplete({
+    ...parked,
+    tasks: parked.tasks.map(task => ({ ...task, status: 'settled' as const })),
+    finalReview: 'clean',
+    finalAudit: 'clean',
+  })).toBe(false)
+
+  // A refused gate is a refusal, not progress: the run is still in implement
+  // and neither parked request was committed.
+  expect(parked.phase).toBe('implement')
+  expect(parked.questions[0]).toMatchObject({ status: 'open', taskId: 'task-1' })
+  expect(eventNames(ports)).not.toContain('orc/review-request')
+  expect(eventNames(ports)).not.toContain('orc/final-review-request')
+
+  await service.answerQuestion(ports.supervisor, questionId!, 'postgres')
+
+  // DSH admits a steer only from the target's durable direct parent, so the
+  // peer's lead — not the Supervisor — is the sender of the answer.
+  expect(ports.subagents.sent).toHaveLength(1)
+  expect(ports.subagents.sent[0]?.to).toBe(String(peer.id))
+  expect(ports.subagents.sent[0]?.from).toBe(String(lead.id))
+  expect(ports.subagents.sent[0]?.text).toContain('postgres')
+
+  // The run resumes: the task settles, and the review request the open
+  // question had refused now opens and carries the run out of implement.
+  const settled = await service.settleTask(peer, 'task-1')
+  expect(settled.tasks).toMatchObject([{ id: 'task-1', status: 'settled' }])
+  ports.reports.push(cleanReport)
+  const reviewing = await service.dispatch(ports.supervisor, 'review', 'review task-1', signal)
+  expect(eventNames(ports).filter(name => name === 'orc/review-request')).toHaveLength(1)
+  // The clean report lands in the same call, so the returned state is already
+  // in `audit`: the run reached it through the review request opened above.
+  expect(reviewing.phase).toBe('audit')
 })
