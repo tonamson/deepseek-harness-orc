@@ -1,3 +1,5 @@
 node_modules/
 lib/
 .npm-cache/
+# Added by code-review-graph
+.code-review-graph/
