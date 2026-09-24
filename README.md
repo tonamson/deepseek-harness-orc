@@ -1,5 +1,7 @@
 # ORC workflow plugin for DeepSeek Harness
 
+**English** | [Tiếng Việt](README.vi.md)
+
 `@tonamson/dsh-orc` is one DSH bundle package that adds the ORC workflow to a
 DeepSeek Harness profile: a Supervisor → Lead → Peer run with separate review
 and security audit, routed through the provider/model or host CLI you choose.

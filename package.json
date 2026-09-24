@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "files": ["lib", "cordis.patch.yml", "README.md", "benchmarks", "scripts"],
+  "files": ["lib", "cordis.patch.yml", "README.md", "README.vi.md", "benchmarks", "scripts"],
   "exports": {
     ".": { "types": "./lib/types/host/index.d.ts", "default": "./lib/host/index.js" },
     "./client": { "types": "./lib/types/client/index.d.ts", "default": "./lib/client.js" },
