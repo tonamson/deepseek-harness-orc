@@ -159,6 +159,8 @@ declare module '@deepseek-ai/dsh-session/types' {
     'orc/peer-create': Extract<OrcEvent, { type: 'peer-create' }>
     'orc/task-start': Extract<OrcEvent, { type: 'task-start' }>
     'orc/task-settle': Extract<OrcEvent, { type: 'task-settle' }>
+    'orc/question-raise': Extract<OrcEvent, { type: 'question-raise' }>
+    'orc/question-answer': Extract<OrcEvent, { type: 'question-answer' }>
     'orc/fix': Extract<OrcEvent, { type: 'fix' }>
     'orc/dismiss': Extract<OrcEvent, { type: 'dismiss' }>
     'orc/complete': Extract<OrcEvent, { type: 'complete' }>
@@ -275,6 +277,14 @@ const ProjectionSchema = z.object({
       correlationId: z.string(),
       stage: z.enum(REQUEST_STAGES),
       consumed: z.boolean(),
+    })),
+    questions: z.array(z.object({
+      id: z.string(),
+      taskId: z.string(),
+      peerId: z.string(),
+      question: z.string(),
+      status: z.enum(['open', 'answered']),
+      answer: z.union([z.string(), z.null()]),
     })),
     taskGate: z.enum(['open', 'passed']),
     finalReview: z.enum(['none', 'clean', 'blocked']),
@@ -471,7 +481,7 @@ export function installOrcJournal(ctx: Context): OrcJournalInstall {
       stateSchema: ProjectionSchema,
       init: () => ({ run: initialState(), risk: null, decisions: [] }),
       apply: applyRecord,
-      stateVersion: 2,
+      stateVersion: 3,
     })
   }, 'orc.projection')
   return Object.assign(() => {

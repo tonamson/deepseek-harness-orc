@@ -46,6 +46,15 @@ function event(type: OrcEvent['type'], actor: Actor, extra: Record<string, unkno
     defaults.peerId = 'peer-1'
   }
   if (type === 'task-settle') defaults.taskId = 'task-1'
+  if (type === 'question-raise') {
+    defaults.questionId = 'q-1'
+    defaults.taskId = 'task-1'
+    defaults.question = 'which database?'
+  }
+  if (type === 'question-answer') {
+    defaults.questionId = 'q-1'
+    defaults.answer = 'postgres'
+  }
   if (type === 'fail') defaults.reason = 'delegated run failed'
   const at = new Date(Date.UTC(2026, 8, 23, 0, 0, clock++)).toISOString()
   return { version: 1, runId: 'run-1', actorId: actorIds[actor], actor, at, type, ...defaults, ...extra } as OrcEvent
@@ -376,4 +385,99 @@ it('is deterministic and leaves its input state untouched', () => {
 it('reads no clock and generates no ids inside the reducer', () => {
   const source = readFileSync(new URL('../src/domain/workflow.ts', import.meta.url), 'utf8')
   expect(source).not.toMatch(/Date\.now|new Date\(|Math\.random|randomUUID/)
+})
+
+/** The legal prefix through `task-start`, leaving the run in `implement`. */
+const throughTaskStart = (): OrcEvent[] => validEvents().slice(0, 8)
+
+it('records a question a peer raises on its own task', () => {
+  const state = replay([...throughTaskStart(), event('question-raise', 'peer')])
+  expect(state.questions).toHaveLength(1)
+  expect(state.questions[0]).toMatchObject({
+    id: 'q-1',
+    taskId: 'task-1',
+    peerId: 'peer-1',
+    question: 'which database?',
+    status: 'open',
+    answer: null,
+  })
+})
+
+it('rejects a question raised by a peer that does not own the task', () => {
+  expect(() => replay([...throughTaskStart(), event('question-raise', 'peer', { actorId: 'peer-2' })])).toThrow(
+    /authority/,
+  )
+})
+
+it('rejects a question on an unknown task', () => {
+  expect(() => replay([...throughTaskStart(), event('question-raise', 'peer', { taskId: 'task-9' })])).toThrow(/unknown task/)
+})
+
+it('rejects a question on a task that already settled', () => {
+  const settled = [...throughTaskStart(), event('task-settle', 'peer')]
+  expect(() => replay([...settled, event('question-raise', 'peer')])).toThrow(/already settled/)
+})
+
+it('rejects an empty question and a duplicate question id', () => {
+  expect(() => replay([...throughTaskStart(), event('question-raise', 'peer', { question: '   ' })])).toThrow(
+    /non-empty/,
+  )
+  const raised = [...throughTaskStart(), event('question-raise', 'peer')]
+  expect(() => replay([...raised, event('question-raise', 'peer')])).toThrow(/duplicate question id/)
+})
+
+it('rejects a question raised by a non-peer actor', () => {
+  for (const actor of ['supervisor', 'lead', 'service'] as const)
+    expect(() => replay([...throughTaskStart(), event('question-raise', actor)]), actor).toThrow(/authority/)
+})
+
+it('answers an open question', () => {
+  const raised = [...throughTaskStart(), event('question-raise', 'peer')]
+  const state = replay([...raised, event('question-answer', 'supervisor')])
+  expect(state.questions[0]).toMatchObject({ status: 'answered', answer: 'postgres' })
+})
+
+it('rejects an answer from a non-supervisor, an unknown question, an already answered question, and an empty answer', () => {
+  const raised = [...throughTaskStart(), event('question-raise', 'peer')]
+  expect(() => replay([...raised, event('question-answer', 'lead')])).toThrow(/authority/)
+  expect(() => replay([...raised, event('question-answer', 'supervisor', { questionId: 'q-9' })])).toThrow(
+    /unknown question/,
+  )
+  expect(() => replay([...raised, event('question-answer', 'supervisor', { answer: '  ' })])).toThrow(/non-empty/)
+  const answered = [...raised, event('question-answer', 'supervisor')]
+  expect(() => replay([...answered, event('question-answer', 'supervisor')])).toThrow(/already answered/)
+})
+
+it('parks the run: an open question refuses the review, the final review, and its own task settlement', () => {
+  const raised = [...throughTaskStart(), event('question-raise', 'peer')]
+  expect(() => replay([...raised, event('task-settle', 'peer')])).toThrow(/blocking: task task-1 has an open question/)
+  expect(() => replay([...raised, event('review-request', 'lead')])).toThrow(/blocking: review cannot start/)
+  expect(() => replay([...raised, event('final-review-request', 'supervisor')])).toThrow(/blocking: the final branch review requires every question answered/)
+})
+
+it('still settles a task that carries no open question', () => {
+  const base = validEvents().slice(0, 7)
+  const secondPeer = event('peer-create', 'lead', { peerId: 'peer-2' })
+  const secondTask = event('task-start', 'lead', { taskId: 'task-2', peerId: 'peer-2' })
+  const raised = [...base, secondPeer, event('task-start', 'lead'), secondTask, event('question-raise', 'peer')]
+  const state = replay([...raised, event('task-settle', 'peer', { actorId: 'peer-2', taskId: 'task-2' })])
+  expect(state.tasks.find(task => task.id === 'task-2')?.status).toBe('settled')
+  expect(state.questions[0]?.status).toBe('open')
+})
+
+it('refuses completion while a question is open', () => {
+  const complete = replay(validEvents())
+  expect(canComplete(complete)).toBe(true)
+  const blocked: OrcState = {
+    ...complete,
+    questions: [
+      { id: 'q-1', taskId: 'task-1', peerId: 'peer-1', question: 'why?', status: 'open', answer: null },
+    ],
+  }
+  expect(canComplete(blocked)).toBe(false)
+})
+
+it('replays a log written before questions existed', () => {
+  const state = replay(validEvents())
+  expect(state.questions).toEqual([])
 })

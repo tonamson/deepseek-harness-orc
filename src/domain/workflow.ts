@@ -58,6 +58,21 @@ export interface RequestRecord {
   consumed: boolean
 }
 
+/** One question a peer raised, and the Supervisor's answer. */
+export interface QuestionRecord {
+  /** Stable identity; derived by the service so a retried raise addresses the same question. */
+  id: string
+  /** The task whose work is blocked. */
+  taskId: string
+  /** The peer that raised it. */
+  peerId: string
+  /** What the peer needs decided. */
+  question: string
+  status: 'open' | 'answered'
+  /** The Supervisor's answer; null while open. */
+  answer: string | null
+}
+
 /** The complete lifecycle state of one ORC run. */
 export interface OrcState {
   /** Empty until `start` opens the run. */
@@ -70,6 +85,8 @@ export interface OrcState {
   tasks: TaskRecord[]
   findings: Finding[]
   requests: RequestRecord[]
+  /** Questions peers raised, in the order they were raised. */
+  questions: QuestionRecord[]
   /** Whether the current implementation round earned a clean review+audit cycle. */
   taskGate: 'open' | 'passed'
   finalReview: FinalGate
@@ -117,6 +134,8 @@ export type OrcEvent =
   | (EventBase & { type: 'peer-create'; peerId: string })
   | (EventBase & { type: 'task-start'; taskId: string; peerId: string })
   | (EventBase & { type: 'task-settle'; taskId: string })
+  | (EventBase & { type: 'question-raise'; questionId: string; taskId: string; question: string })
+  | (EventBase & { type: 'question-answer'; questionId: string; answer: string })
   | (EventBase & { type: 'fix'; findingId: string })
   | (EventBase & { type: 'dismiss'; findingId: string; reason: string })
   | (EventBase & { type: 'complete' })
@@ -170,6 +189,7 @@ export function initialState(): OrcState {
     tasks: [],
     findings: [],
     requests: [],
+    questions: [],
     taskGate: 'open',
     finalReview: 'none',
     finalAudit: 'none',
@@ -229,6 +249,8 @@ function requireAllTasksSettled(state: OrcState): void {
 const hasOpenBlocking = (state: OrcState): boolean =>
   state.findings.some(finding => finding.status === 'open' && isBlocking(finding.severity))
 
+const hasOpenQuestion = (state: OrcState): boolean => state.questions.some(question => question.status === 'open')
+
 function completionBlockers(state: OrcState): string[] {
   const blockers: string[] = []
   const unsettled = state.tasks.filter(task => task.status !== 'settled').length
@@ -237,6 +259,8 @@ function completionBlockers(state: OrcState): string[] {
   if (state.finalAudit !== 'clean') blockers.push(`final audit is ${state.finalAudit}`)
   const open = state.findings.filter(finding => finding.status === 'open' && isBlocking(finding.severity)).length
   if (open > 0) blockers.push(`${open} blocking finding(s) are unresolved`)
+  const unanswered = state.questions.filter(question => question.status === 'open').length
+  if (unanswered > 0) blockers.push(`${unanswered} question(s) are unanswered`)
   return blockers
 }
 
@@ -244,15 +268,17 @@ function completionBlockers(state: OrcState): string[] {
  * The single completion predicate.
  *
  * A run may complete only when every task has settled, both final branch gates
- * are clean, and no blocking finding is still open. A missing, malformed, or
- * failed final audit leaves `finalAudit` short of `clean`, so it blocks.
+ * are clean, no blocking finding is still open, and no question is unanswered.
+ * A missing, malformed, or failed final audit leaves `finalAudit` short of
+ * `clean`, so it blocks.
  */
 export function canComplete(state: OrcState): boolean {
   return (
     state.tasks.every(task => task.status === 'settled') &&
     state.finalReview === 'clean' &&
     state.finalAudit === 'clean' &&
-    !state.findings.some(finding => finding.status === 'open' && isBlocking(finding.severity))
+    !state.findings.some(finding => finding.status === 'open' && isBlocking(finding.severity)) &&
+    !state.questions.some(question => question.status === 'open')
   )
 }
 
@@ -326,7 +352,57 @@ const TRANSITIONS: TransitionTable = {
       if (task.peerId !== event.actorId)
         throw new WorkflowError(`authority: peer ${event.actorId} may not settle task ${event.taskId} assigned to ${task.peerId}`)
       if (task.status === 'settled') throw new WorkflowError(`task ${event.taskId} is already settled`)
+      if (state.questions.some(question => question.status === 'open' && question.taskId === event.taskId))
+        throw new WorkflowError(`blocking: task ${event.taskId} has an open question; answer it before settling`)
       return { ...state, tasks: state.tasks.map(candidate => (candidate.id === task.id ? { ...candidate, status: 'settled' } : candidate)) }
+    },
+  },
+  'question-raise': {
+    roles: ['peer'],
+    from: ['implement'],
+    apply: (state, event) => {
+      const task = state.tasks.find(candidate => candidate.id === event.taskId)
+      if (!task) throw new WorkflowError(`unknown task ${event.taskId}`)
+      if (task.peerId !== event.actorId)
+        throw new WorkflowError(
+          `authority: peer ${event.actorId} may not raise a question on task ${event.taskId} assigned to ${task.peerId}`,
+        )
+      if (task.status === 'settled') throw new WorkflowError(`phase: task ${event.taskId} is already settled`)
+      if (event.question.trim() === '') throw new WorkflowError('a question requires non-empty text')
+      if (state.questions.some(question => question.id === event.questionId))
+        throw new WorkflowError(`duplicate question id ${event.questionId}`)
+      return {
+        ...state,
+        questions: [
+          ...state.questions,
+          {
+            id: event.questionId,
+            taskId: event.taskId,
+            peerId: event.actorId,
+            question: event.question,
+            status: 'open',
+            answer: null,
+          },
+        ],
+      }
+    },
+  },
+  'question-answer': {
+    roles: ['supervisor'],
+    from: NON_TERMINAL_PHASES,
+    authority: requireSupervisor,
+    apply: (state, event) => {
+      const question = state.questions.find(candidate => candidate.id === event.questionId)
+      if (!question) throw new WorkflowError(`unknown question ${event.questionId}`)
+      if (question.status !== 'open')
+        throw new WorkflowError(`question ${event.questionId} is already ${question.status}`)
+      if (event.answer.trim() === '') throw new WorkflowError('an answer requires non-empty text')
+      return {
+        ...state,
+        questions: state.questions.map(candidate =>
+          candidate.id === question.id ? { ...candidate, status: 'answered', answer: event.answer } : candidate,
+        ),
+      }
     },
   },
   'review-request': {
@@ -336,6 +412,8 @@ const TRANSITIONS: TransitionTable = {
     apply: (state, event) => {
       if (hasOpenBlocking(state))
         throw new WorkflowError('blocking: review cannot start while a blocking finding is open; fix it first')
+      if (hasOpenQuestion(state))
+        throw new WorkflowError('blocking: review cannot start while a question is open; answer it first')
       return { ...openRequest(state, event.correlationId, 'review'), phase: 'review' }
     },
   },
@@ -369,6 +447,10 @@ const TRANSITIONS: TransitionTable = {
     from: ['implement'],
     authority: requireSupervisor,
     apply: (state, event) => {
+      // The question gate precedes the settled-task gate: an open question always
+      // leaves its own task unsettled, so checking it second would make it dead code.
+      if (hasOpenQuestion(state))
+        throw new WorkflowError('blocking: the final branch review requires every question answered')
       requireAllTasksSettled(state)
       if (state.taskGate !== 'passed')
         throw new WorkflowError('phase: the final branch review requires a completed task-level review and audit cycle')
