@@ -157,6 +157,15 @@ run keeps its phase, so you can configure a route or generate the missing
 evidence and dispatch the same stage again — no restart, and no lost work. Every
 other routing failure, such as a provider discovery fault, remains blocking.
 
+**One ORC run per session, and a failed or completed run ends ORC for that
+session.** `OrcService.start` returns the run a session already recorded whenever
+one has started, so a session that has run ORC cannot start a second run. The
+`failed` phase is terminal, and so is `completed`: a single transient provider or
+CLI error during a dispatch therefore ends ORC in that session, and the only
+recovery is to start a new chat session. Route refusals (above) and refused
+reports are the recoverable cases — they leave the run in its phase, so the same
+stage can be dispatched again.
+
 ## Benchmark evidence
 
 The bundle ships known-bug and false-positive fixtures under `benchmarks/` and
@@ -210,6 +219,23 @@ excluded from high-risk review and audit until you measure them with the runner
 below. That is the fail-closed behavior, not a defect: an unmeasured version may
 behave differently.
 
+**The two shipped records expire on 2026-10-01.** They were measured on
+2026-09-24 and the default `catalogMaxAgeDays` is 7, so from 2026-10-01 they are
+no longer fresh and every high-risk review and audit fails closed with
+`no-qualifying-route` until the routes are re-measured. Re-measure both shipped
+routes with the runner — the version must be the exact version the installed CLI
+reports:
+
+```sh
+node scripts/benchmark.mjs \
+  --backend codex --model gpt-6-sol --effort high --version 0.156.1 \
+  --command codex --arg exec --arg --json --arg -
+
+node scripts/benchmark.mjs \
+  --backend claude --model claude-sonnet-5 --effort high --version 2.1.281 \
+  --command-json '["claude","--print","--output-format","json","--model","claude-sonnet-5","--effort","high"]'
+```
+
 Each score is a measurement, not a promise. It was taken on one specific machine,
 account, and CLI build against this suite revision, so a record is evidence that
 this exact route cleared the floors — not a general quality guarantee about the
@@ -218,8 +244,17 @@ at all still yields the fail-closed empty snapshot, which refuses high-risk
 review and audit with `no-qualifying-route` rather than admitting an unmeasured
 route.
 
-Generate one additional versioned record per route you want high-risk review and
-audit routed to. From a recorded run:
+**A DSH provider route can never serve high-risk review or audit.** The live
+provider catalog exposes no backend version — every provider catalog entry
+records an empty `backendVersion` — and admissibility requires a real, non-empty
+version equal to that live observation (R22). No record you generate can change
+that, because there is no provider version for a record to match; that path is
+served by a host CLI (Codex or Claude Code), whose live catalog does carry a
+version. Provider routes remain usable for `spec`, `plan`, `code`, and for a
+review or audit the classifier does not mark high-risk.
+
+Generate one additional versioned record per **host CLI** route you want
+high-risk review and audit routed to. From a recorded run:
 
 ```sh
 node scripts/benchmark.mjs \
@@ -316,6 +351,17 @@ the set is updated.
    only compatibility mechanism is the persisted `SessionEvent.ignorable` marker,
    which `Session.append` cannot set. A session whose log contains `orc/*`
    events therefore fails to resume until DSH exposes an ignorable-append path.
+3. **The two shipped benchmark records expire on 2026-10-01.** They are dated
+   2026-09-24 and the default `catalogMaxAgeDays` is 7, so from 2026-10-01 every
+   high-risk review and audit fails closed with `no-qualifying-route` until the
+   routes are re-measured with the runner (see
+   [Benchmark evidence](#benchmark-evidence)).
+4. **One ORC run per session.** A session whose ORC run reached `failed` or
+   `completed` cannot start another one: `OrcService.start` returns the existing
+   run, and both phases are terminal. A single transient provider or CLI error
+   during a dispatch therefore ends ORC for that session, and the only recovery
+   is a new chat session. Route refusals and refused reports are recoverable in
+   place, because they leave the run in its phase.
 
 ## Development
 
