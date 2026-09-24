@@ -1316,13 +1316,44 @@ describe('report location', () => {
       .rejects.toThrow(/^blocking: the answer is not the report JSON: /)
     const elapsed = performance.now() - started
 
-    // The budget caps the scan at 4 MiB of characters, so this is ~10 ms in
-    // practice; the threshold is deliberately loose for a slow machine while
+    // The budget caps the scan at 4 MiB of charged characters, so this is ~10 ms
+    // in practice; the threshold is deliberately loose for a slow machine while
     // still failing the unbounded scan by more than an order of magnitude.
     expect(elapsed).toBeLessThan(1_000)
     expect(ports.journal.events.at(-1)!.type).toBe('orc/report-rejected')
     expect(eventNames(ports)).not.toContain('orc/review-result')
   })
+
+  it.each([
+    ['{a}', 1_400_000],
+    ['{a}', 350_000],
+    ['{,}', 1_400_000],
+  ] as [string, number][])(
+    'refuses a parse-dominated answer of %s repeated %d times quickly',
+    async (unit, count) => {
+      const ports = fakePorts()
+      const svc = new OrcService(ports)
+      await toReview(ports, svc)
+      // Every candidate balances after three characters and then fails to parse,
+      // so a budget charged only for characters admits one JSON.parse attempt per
+      // three characters: `'{a}'` 1.4M times measured ~4.0 s end-to-end and 350k
+      // times ~0.96 s, the 350k shape sitting inside the CLI adapter's 1 MiB
+      // stdout cap and the 1.4M shape being reachable because a provider route
+      // sets no byte cap at all. Charging each attempt as well is what makes the
+      // bound real; this threshold is ~10x the measured cost after the charge and
+      // still far below the old character-only cost.
+      ports.reports.push(rawAnswer(unit.repeat(count)))
+
+      const started = performance.now()
+      await expect(svc.dispatch(ports.supervisor, 'review', 'review task-1', signal))
+        .rejects.toThrow(/^blocking: the answer is not the report JSON: /)
+      const elapsed = performance.now() - started
+
+      expect(elapsed).toBeLessThan(400)
+      expect(ports.journal.events.at(-1)!.type).toBe('orc/report-rejected')
+      expect(eventNames(ports)).not.toContain('orc/review-result')
+    },
+  )
 })
 
 describe('catalog reads', () => {

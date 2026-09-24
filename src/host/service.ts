@@ -369,23 +369,50 @@ function fenceBodies(text: string): string[] {
 }
 
 /**
- * The total number of characters {@link firstBalancedObject} may scan before it
- * gives up and reports nothing locatable.
+ * The total work {@link firstBalancedObject} may spend before it gives up and
+ * reports nothing locatable, counted in character-equivalents.
  *
  * Every candidate `{` rescans forward from its own position, so an answer that
  * is a long run of never-balancing `{` is quadratic in its length: measured
  * end-to-end through {@link OrcService.dispatch}, 10k `{` took 139 ms, 50k took
  * 3.4 s, and 100k took 13.3 s — synchronously, on the host's event loop.
  *
+ * Two different costs are charged against this one budget, because bounding
+ * only the first is not a bound at all. Scanning a character is cheap (a few
+ * nanoseconds); a `JSON.parse` attempt is not, and a *failing* attempt costs a
+ * fixed overhead of roughly two microseconds whatever the span's length. An
+ * answer that is a long run of tiny never-parsing objects — `'{a}'` repeated,
+ * say — reaches one parse attempt every three characters, so a character-only
+ * budget still admits millions of attempts: measured end-to-end, `'{a}'`
+ * repeated 1.4M times took ~4.0 s and 350k times took ~0.96 s while never
+ * leaving the character budget. So every examined character costs one unit and
+ * every candidate that reaches `JSON.parse` costs
+ * {@link REPORT_PARSE_ATTEMPT_CHAR_COST} more.
+ *
  * The budget is four times the 1 MiB stdout cap the CLI adapter enforces on one
- * answer, so a maximum-size answer is still rescanned several times over and
- * every wrapping a real backend produces is located exactly as before — while
- * the work stays bounded absolutely, whatever a provider route returns. A
- * degenerate answer is refused in milliseconds. Exhausting the budget is
- * "nothing locatable", which the caller already refuses with its bounded,
- * redacted message.
+ * answer, and the per-attempt charge still allows thousands of parse attempts,
+ * so every wrapping a real backend produces is located exactly as before. The
+ * guarantee is that the work is bounded by this many character-equivalents for
+ * *any* answer, whatever its shape and whatever a provider route returns — not
+ * that any particular answer is fast, and not that the bound is a wall-clock
+ * one. Exhausting the budget is "nothing locatable", which the caller already
+ * refuses with its bounded, redacted message; nothing is ever accepted from a
+ * truncated scan.
  */
 const REPORT_SCAN_CHAR_BUDGET = 4 * 1_048_576
+
+/**
+ * The character-equivalents charged for one `JSON.parse` attempt, so that
+ * attempts are bounded too and not only the characters they span.
+ *
+ * A failing parse of a three-character span measures ~2.1 µs; scanning measures
+ * a few nanoseconds per character, so one attempt is worth roughly 1000 scanned
+ * characters. 1024 is that figure rounded up: it keeps the charge honest while
+ * leaving the whole 4 MiB budget good for 4096 attempts — far more than any
+ * real answer presents, and about 9 ms of parse work even when every attempt
+ * fails.
+ */
+const REPORT_PARSE_ATTEMPT_CHAR_COST = 1024
 
 /**
  * The first balanced `{…}` object in the text that parses as JSON.
@@ -400,19 +427,24 @@ const REPORT_SCAN_CHAR_BUDGET = 4 * 1_048_576
  * closes before the report, and abandoning the scan there would refuse an
  * otherwise locatable answer.
  *
- * The whole scan is bounded by {@link REPORT_SCAN_CHAR_BUDGET}: once the budget
- * is spent the scan stops and reports nothing locatable, so a pathological
- * answer cannot stall the event loop. Every normal answer is far inside the
- * budget and is located exactly as it was before the bound existed.
+ * The whole scan is bounded by {@link REPORT_SCAN_CHAR_BUDGET}: the characters
+ * it examines *and* the parse attempts it makes are charged against it, so once
+ * the budget is spent the scan stops and reports nothing locatable. Every normal
+ * answer is far inside the budget and is located exactly as it was before the
+ * bound existed.
  */
 function firstBalancedObject(text: string): unknown {
-  let scanned = 0
+  let charged = 0
   for (let start = text.indexOf('{'); start !== -1; start = text.indexOf('{', start + 1)) {
-    const remaining = REPORT_SCAN_CHAR_BUDGET - scanned
+    const remaining = REPORT_SCAN_CHAR_BUDGET - charged
     if (remaining <= 0) return undefined
     const { end, used } = balancedEnd(text, start, remaining)
-    scanned += used
+    charged += used
     if (end === -1) continue
+    // Charge the attempt before making it, so a budget already too small to
+    // afford a parse stops here rather than overshooting by one attempt.
+    if (charged + REPORT_PARSE_ATTEMPT_CHAR_COST > REPORT_SCAN_CHAR_BUDGET) return undefined
+    charged += REPORT_PARSE_ATTEMPT_CHAR_COST
     const parsed = tryJson(text.slice(start, end))
     if (parsed !== undefined) return parsed
   }
