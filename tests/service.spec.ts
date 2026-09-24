@@ -1200,6 +1200,8 @@ describe('report location', () => {
     ['a plain fenced block', body => `\`\`\`\n${body}\n\`\`\``],
     ['prose before and after', body => `No staged change, file src/pay.ts not found in repo. ${body}\nThat is all.`],
     ['prose carrying an earlier unrelated brace', body => `The map {a, b} is unrelated, but here it is: ${body}`],
+    ['prose carrying an unmatched brace before the report', body => `The map { is never closed, but here it is: ${body}`],
+    ['a code fence before the fenced report', body => `\`\`\`\nfunction pay() {\n\`\`\`\nThe report follows.\n\`\`\`json\n${body}\n\`\`\``],
   ]
 
   it.each(wrappers)('locates a report wrapped in %s', async (_name, wrap) => {

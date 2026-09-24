@@ -330,8 +330,10 @@ const idOf = (id: SessionId): string => String(id)
  * is used:
  *
  * 1. the whole answer as exact JSON — the contract's own shape;
- * 2. the content of a single fenced code block (```` ```json ```` or ```` ``` ````),
- *    which is how a model marks up an object it was told not to fence;
+ * 2. the content of every fenced code block (```` ```json ```` or ```` ``` ````),
+ *    in order, which is how a model marks up an object it was told not to
+ *    fence — and a model that fences a snippet before the report produces more
+ *    than one;
  * 3. the first balanced `{…}` object in the text, scanned with string literals
  *    and escapes respected, which is how a model wraps the object in a sentence.
  *
@@ -341,9 +343,8 @@ const idOf = (id: SessionId): string => String(id)
 function locateReport(text: string): unknown {
   const exact = tryJson(text)
   if (exact !== undefined) return exact
-  const fenced = singleFence(text)
-  if (fenced !== undefined) {
-    const parsed = tryJson(fenced)
+  for (const body of fenceBodies(text)) {
+    const parsed = tryJson(body)
     if (parsed !== undefined) return parsed
   }
   return firstBalancedObject(text)
@@ -358,10 +359,9 @@ function tryJson(text: string): unknown {
   }
 }
 
-/** The content of the answer's single fenced block, or `undefined` for zero or many. */
-function singleFence(text: string): string | undefined {
-  const fences = [...text.matchAll(/```(?:json)?[ \t]*\r?\n?([\s\S]*?)```/g)]
-  return fences.length === 1 ? fences[0]![1] ?? '' : undefined
+/** The content of every fenced block in the answer, in the order they appear. */
+function fenceBodies(text: string): string[] {
+  return [...text.matchAll(/```(?:json)?[ \t]*\r?\n?([\s\S]*?)```/g)].map(match => match[1] ?? '')
 }
 
 /**
@@ -372,11 +372,15 @@ function singleFence(text: string): string | undefined {
  * the object. A balanced span that is not JSON is skipped — prose may contain
  * its own braces — but once a span *is* JSON it is the located object: a report
  * that then fails validation is refused, never replaced by a later object.
+ *
+ * A `{` that never balances is skipped too: prose may open a brace it never
+ * closes before the report, and abandoning the scan there would refuse an
+ * otherwise locatable answer.
  */
 function firstBalancedObject(text: string): unknown {
   for (let start = text.indexOf('{'); start !== -1; start = text.indexOf('{', start + 1)) {
     const end = balancedEnd(text, start)
-    if (end === -1) break
+    if (end === -1) continue
     const parsed = tryJson(text.slice(start, end))
     if (parsed !== undefined) return parsed
   }
