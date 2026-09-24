@@ -13,6 +13,12 @@
  *   plus repeated `--arg`, or `--command-json` — with the fixture prompt on
  *   stdin, and refuses to write a record whose `backendVersion` would be empty
  *   (R22: an empty live version can never be admissible evidence);
+ * - before the finding regex runs, the runner reduces the selected CLI's real
+ *   output to the assistant's accepted final text: the `item.completed`
+ *   `agent_message` text of a Codex `--json` JSONL stream, or the whole stdout
+ *   when the output is plain text (`claude --print`, `codex exec` without
+ *   `--json`). An invocation that exits 0 but yields no extractable text fails
+ *   the run; an extracted-but-empty report still scores zero findings;
  * - the prompt it sends names that fixture's candidate finding ids as the only
  *   reportable vocabulary and never marks which are present — the candidates
  *   mix the seeded ids with plausible distractors, and a clean fixture offers a
@@ -39,6 +45,10 @@ const ECHO = join(ROOT, 'tests', 'fixtures', 'benchmark-echo.mjs')
 const CAPTURE = join(ROOT, 'tests', 'fixtures', 'benchmark-prompt.mjs')
 /** The fake review CLI that echoes every candidate id its fixture prompt offers. */
 const ECHO_CANDIDATES = join(ROOT, 'tests', 'fixtures', 'benchmark-echo-candidates.mjs')
+/** The fake `codex exec --json` CLI, whose answer rides inside a JSONL event. */
+const CODEX_JSONL = join(ROOT, 'tests', 'fixtures', 'benchmark-codex-jsonl.mjs')
+/** The fake plain-text CLI, the shape `claude --print` and `codex exec` emit. */
+const PLAIN_TEXT = join(ROOT, 'tests', 'fixtures', 'benchmark-plain-text.mjs')
 
 /** One seeded or clean fixture as `benchmarks/fixtures.json` ships it. */
 interface Fixture {
@@ -333,5 +343,115 @@ describe('benchmark fixture prompt', () => {
     // The old exploit cleared both admissibility floors; it no longer does.
     const floors = { detection: 0.8, falsePositive: 0.2 }
     expect(record.detectionScore >= floors.detection && record.falsePositiveScore <= floors.falsePositive).toBe(false)
+  })
+})
+
+describe('benchmark runner output extraction', () => {
+  /** Every id the suite seeds, in fixture order. */
+  const EXPECTED = FIXTURES.flatMap(fixture => fixture.expected)
+
+  /** One scored fixture as the runner records it. */
+  interface ScoredFixture {
+    id: string
+    reported: string[]
+    detected: string[]
+    falsePositives: string[]
+  }
+
+  it('extracts findings from a Codex --json JSONL response', () => {
+    // The defect this fix closes: Codex carries the answer as one JSON string
+    // field with escaped newlines, so a runner that splits raw stdout on real
+    // newlines sees no `FINDING:` line at all and scores zero. All four seeded
+    // ids are sent to every fixture, so detection reaches 1.0 only if the JSON
+    // string was decoded into four separate finding lines before the regex ran;
+    // undecoded, the whole answer would be one blob and detection would be 0.
+    const result = run(...ROUTE, '--command', process.execPath, '--arg', CODEX_JSONL, ...EXPECTED.flatMap(id => ['--arg', id]))
+    expect(result.status).toBe(0)
+    expect(result.record).toMatchObject({ detectionScore: 1 })
+
+    const perFixture = result.record?.perFixture as ScoredFixture[]
+    for (const scored of perFixture) {
+      const fixture = FIXTURES.find(entry => entry.id === scored.id)
+      // Each fixture decoded the same four findings and credited exactly its own.
+      expect(scored.reported).toEqual(EXPECTED)
+      expect(scored.detected).toEqual(fixture?.expected)
+    }
+  })
+
+  it('extracts findings from a plain-text response', () => {
+    // `claude --print` (default `--output-format text`) and `codex exec`
+    // without `--json` write prose and findings as ordinary stdout text, so the
+    // whole output is the answer. The fake wraps each finding in prose to prove
+    // the extraction does not require the first line to be a finding.
+    const result = run(...ROUTE, '--command', process.execPath, '--arg', PLAIN_TEXT, ...EXPECTED.flatMap(id => ['--arg', id]))
+    expect(result.status).toBe(0)
+    expect(result.record).toMatchObject({ detectionScore: 1 })
+
+    const perFixture = result.record?.perFixture as ScoredFixture[]
+    for (const scored of perFixture) {
+      const fixture = FIXTURES.find(entry => entry.id === scored.id)
+      expect(scored.reported).toEqual(EXPECTED)
+      expect(scored.detected).toEqual(fixture?.expected)
+    }
+  })
+
+  it('fails a run whose exit-0 output carries no extractable assistant text', () => {
+    // A Codex stream that completed its turn without ever producing an
+    // agent_message: nothing to score, so the run must fail loudly rather than
+    // record zero findings. The diagnostic names the fixture and the format it
+    // expected, and redacts the token-shaped reasoning text it echoes.
+    const noMessage = run(...ROUTE, '--command', process.execPath, '--arg', CODEX_JSONL, '--arg', '--no-message')
+    expect(noMessage.status).toBe(1)
+    expect(noMessage.record).toBeUndefined()
+    expect(noMessage.stderr).toMatch(/^benchmark: the selected route run failed: /)
+    expect(noMessage.stderr).toContain('fixture "fin-round-up" produced no extractable assistant text')
+    expect(noMessage.stderr).toContain('no item.completed agent_message event')
+    expect(noMessage.stderr).toContain('item.completed agent_message event, or plain text on stdout')
+    // Requirement 3: the excerpt is a short, safe diagnostic, never raw output.
+    expect(noMessage.stderr).not.toContain('sk-ant-api03-EXAMPLEONLY0000000000')
+    expect(noMessage.stderr).toContain('<redacted>')
+
+    // A plain-text invocation that exits 0 having written nothing is the same
+    // failure, not a clean zero.
+    const silent = run(...ROUTE, '--command', process.execPath, '--arg', PLAIN_TEXT, '--arg', '--silent')
+    expect(silent.status).toBe(1)
+    expect(silent.record).toBeUndefined()
+    expect(silent.stderr).toContain('fixture "fin-round-up" produced no extractable assistant text')
+    expect(silent.stderr).toContain('it wrote nothing to stdout')
+  })
+
+  it('scores an extracted but empty report as zero findings without failing', () => {
+    // The other direction of the distinction: the assistant answered and said
+    // nothing. That is a real report — the expected one on a clean fixture — so
+    // it must score zero findings and write a record, not fail the run.
+    const result = run(...ROUTE, '--command', process.execPath, '--arg', CODEX_JSONL, '--arg', '--empty-report')
+    expect(result.status).toBe(0)
+    expect(result.record).toMatchObject({ detectionScore: 0, falsePositiveScore: 0 })
+
+    const perFixture = result.record?.perFixture as ScoredFixture[]
+    for (const scored of perFixture) expect(scored.reported).toEqual([])
+    // The clean fixtures are the ones this reading exists for, and they are
+    // scored rather than skipped.
+    const clean = FIXTURES.filter(fixture => fixture.expected.length === 0).map(fixture => fixture.id)
+    expect(clean.length).toBeGreaterThan(0)
+    expect(perFixture.filter(scored => clean.includes(scored.id)).length).toBe(clean.length)
+  })
+
+  it('fails a Codex JSONL stream carrying a turn.failed or error event', () => {
+    // A failed turn is not an empty report: a runner that ignored the failure
+    // would credit the findings the doomed turn had already emitted.
+    const failed = run(
+      ...ROUTE,
+      '--command', process.execPath, '--arg', CODEX_JSONL,
+      '--arg', '--turn-failed', '--arg', 'rounding-overpays',
+    )
+    expect(failed.status).toBe(1)
+    expect(failed.record).toBeUndefined()
+    expect(failed.stderr).toContain('the turn failed with a Codex "turn.failed" event')
+
+    const errored = run(...ROUTE, '--command', process.execPath, '--arg', CODEX_JSONL, '--arg', '--error')
+    expect(errored.status).toBe(1)
+    expect(errored.record).toBeUndefined()
+    expect(errored.stderr).toContain('the turn failed with a Codex "error" event')
   })
 })

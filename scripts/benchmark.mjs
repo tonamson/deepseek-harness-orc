@@ -25,8 +25,26 @@
  * finding.
  *
  * A live invocation is spawned once per fixture with the fixture prompt on
- * stdin and its stdout parsed the same way. The prompt is deterministic and
- * built from the fixture alone: it carries the scope and the code, and it names
+ * stdin. Its stdout is first reduced to the assistant's accepted final text and
+ * only then scanned for `FINDING:` lines, because the supported CLIs do not
+ * agree on an output shape:
+ *
+ * - Codex `--json` writes JSONL, one event object per line, and the answer is
+ *   the `text` of the `item.completed` event whose item type is
+ *   `agent_message`; JSON decoding restores the newlines it escaped. Non-
+ *   assistant events are ignored, and a `turn.failed` or top-level `error`
+ *   event — the two the Codex schema calls fatal — fails that fixture's run.
+ * - Anything else is plain text, and the whole stdout is the answer. That
+ *   covers `claude --print` and `codex exec` without `--json`.
+ *
+ * An invocation that exits 0 but yields no extractable assistant text fails the
+ * run and writes no record; it is never scored as a zero-finding (clean) run.
+ * A successfully extracted but empty report still scores zero findings, which
+ * is the correct reading for a clean fixture. A `--responses` run bypasses all
+ * of this and is unchanged.
+ *
+ * The prompt is deterministic and built from the fixture alone: it carries the
+ * scope and the code, and it names
  * that fixture's `candidates` — the exact vocabulary the scorer accepts — so a
  * run measures whether the route found the seeded bug rather than whether it
  * guessed the identifier string.
@@ -54,6 +72,7 @@
 
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
+import { realpathSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -69,6 +88,127 @@ const SUITE_REVISION = 'orc-review-v1'
 const SCOPE = ['financial', 'security']
 
 const FINDING_LINE = /^\s*FINDING:\s*(\S+)\s*$/i
+
+/** The top-level event types Codex `--json` emits (codex-rs `exec_events.rs`). */
+const CODEX_EVENT_TYPES = new Set([
+  'thread.started',
+  'turn.started',
+  'turn.completed',
+  'turn.failed',
+  'item.started',
+  'item.updated',
+  'item.completed',
+  'error',
+])
+
+/**
+ * The Codex `--json` events that mean the turn produced no answer.
+ *
+ * The schema distinguishes these two fatal events from an `item` whose type is
+ * `error`, which it documents as a *non-fatal* error surfaced as an item: that
+ * one is an ignored non-assistant event, and the turn can still carry an
+ * `agent_message`.
+ */
+const CODEX_FAILURE_EVENTS = new Set(['turn.failed', 'error'])
+
+/** The item type whose `text` is the assistant's accepted final message. */
+const CODEX_AGENT_MESSAGE = 'agent_message'
+
+/** How much redacted provider output a failure diagnostic may carry. */
+const EXCERPT_LIMIT = 200
+
+/**
+ * The token-redaction discipline the rest of the repo uses
+ * (`src/host/cli.ts:178`), kept local so this runner stays self-contained: raw
+ * provider output is never surfaced, only a short excerpt with ANSI escapes
+ * stripped, token shapes masked, and absolute paths replaced.
+ */
+const ANSI_PATTERN = /\u001B\[[0-9;?]*[ -/]*[@-~]/g
+const TOKEN_PATTERNS = [
+  /\bsk-[A-Za-z0-9_*-]{3,}/g,
+  /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{8,}/g,
+  /\bxox[baprs]-[A-Za-z0-9-]{8,}/g,
+  /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g,
+  /\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/gi,
+  /-----BEGIN[^-]*PRIVATE KEY-----[\s\S]*?-----END[^-]*PRIVATE KEY-----/g,
+]
+const ABSOLUTE_PATH_PATTERN = /(?:[A-Za-z]:[\\/]|~?\/)[^\s"'`,;:)\]}]+/g
+
+/** A short, safe excerpt of raw provider output for a failure diagnostic. */
+function safeExcerpt(text, executable = '') {
+  let safe = String(text ?? '').replace(ANSI_PATTERN, '')
+  for (const pattern of TOKEN_PATTERNS) safe = safe.replace(pattern, '<redacted>')
+  safe = safe.replace(
+    ABSOLUTE_PATH_PATTERN,
+    match => (executable !== '' && (match === executable || match.startsWith(`${executable}/`)) ? match : '<path>'),
+  )
+  safe = safe.replace(/\s+/g, ' ').trim()
+  return safe.length > EXCERPT_LIMIT ? `${safe.slice(0, EXCERPT_LIMIT)}…` : safe
+}
+
+/**
+ * Read a Codex `--json` JSONL stream, or report that this is not one.
+ *
+ * Returns `undefined` when the output is not Codex JSONL — no line is an event
+ * with a recognised Codex type — so it falls through to plain text. When it IS
+ * Codex JSONL it returns the parsed events and the number of lines that could
+ * not be read as one: a stream that is recognisably Codex but carries an
+ * unreadable line is corrupt, never a plain-text answer to be scored.
+ */
+function codexStreamOf(lines) {
+  const events = []
+  let unreadable = 0
+  for (const line of lines) {
+    let event
+    try {
+      event = JSON.parse(line)
+    } catch {
+      unreadable += 1
+      continue
+    }
+    if (event === null || typeof event !== 'object' || Array.isArray(event) || typeof event.type !== 'string') {
+      unreadable += 1
+      continue
+    }
+    events.push(event)
+  }
+  if (!events.some(event => CODEX_EVENT_TYPES.has(event.type))) return undefined
+  return { events, unreadable }
+}
+
+/**
+ * The assistant's accepted final text from one invocation's raw stdout, or why
+ * it could not be extracted.
+ *
+ * `ok: true` with `text: ''` is a real, successfully extracted empty report —
+ * the assistant answered and said nothing, which is the expected answer on a
+ * clean fixture and scores zero findings. `ok: false` means the invocation
+ * produced no answer at all, which must fail the run rather than be normalised
+ * into a clean zero-finding score.
+ */
+function extractAssistantText(stdout) {
+  const source = typeof stdout === 'string' ? stdout : ''
+  if (source.trim() === '') return { ok: false, reason: 'it wrote nothing to stdout' }
+  const lines = source.split('\n').map(line => line.trim()).filter(line => line.length > 0)
+  const stream = codexStreamOf(lines)
+  // Not Codex JSONL: the whole stdout is the assistant text (`claude --print`,
+  // and `codex exec` without `--json`).
+  if (stream === undefined) return { ok: true, text: source }
+  if (stream.unreadable > 0) {
+    return { ok: false, reason: `its Codex JSONL stream carried ${stream.unreadable} unreadable line(s)` }
+  }
+  const failure = stream.events.find(event => CODEX_FAILURE_EVENTS.has(event.type))
+  if (failure !== undefined) {
+    return { ok: false, reason: `the turn failed with a Codex "${failure.type}" event` }
+  }
+  const messages = stream.events
+    .filter(event => event.type === 'item.completed' && event.item?.type === CODEX_AGENT_MESSAGE && typeof event.item.text === 'string')
+    .map(event => event.item.text)
+  if (messages.length === 0) {
+    return { ok: false, reason: `its Codex JSONL stream carried no item.completed ${CODEX_AGENT_MESSAGE} event` }
+  }
+  return { ok: true, text: messages.join('\n') }
+}
 
 function fail(message) {
   process.stderr.write(`benchmark: ${message}\n`)
@@ -281,7 +421,7 @@ function runCommand(argv, input) {
     child.on('error', error => rejectRun(new Error(`could not start "${executable}": ${String(error?.message ?? error)}`)))
     child.on('close', code => code === 0
       ? resolveRun(stdout)
-      : rejectRun(new Error(`command exited ${code}: ${stderr.trim()}`)))
+      : rejectRun(new Error(`command exited ${code}: ${safeExcerpt(stderr) || '<no stderr>'}`)))
     child.stdin.end(input)
   })
 }
@@ -295,7 +435,24 @@ async function collect(fixtures, args, argv) {
   }
   const started = Date.now()
   const responses = {}
-  for (const fixture of fixtures) responses[fixture.id] = await runCommand(argv, promptFor(fixture))
+  for (const fixture of fixtures) {
+    const stdout = await runCommand(argv, promptFor(fixture))
+    const extracted = extractAssistantText(stdout)
+    if (!extracted.ok) {
+      // Fail closed: a spawned invocation that exited 0 but yielded no
+      // assistant text is a broken run, not a clean report. Scoring it would
+      // normalise unparseable output into a zero-finding (clean) result.
+      throw new Error(
+        `fixture "${fixture.id}" produced no extractable assistant text: ${extracted.reason}. `
+        + 'Expected Codex --json JSONL carrying an item.completed agent_message event, or plain text on stdout '
+        + '(the whole output is the answer for claude --print and for codex exec without --json). '
+        + `Diagnostic: ${safeExcerpt(stdout) || '<no stdout>'}`,
+      )
+    }
+    // `ok: true` with empty text is a real answer that reported nothing — the
+    // expected shape for a clean fixture — so it is scored, not failed.
+    responses[fixture.id] = extracted.text
+  }
   return { responses, latencyMs: Date.now() - started }
 }
 
@@ -332,67 +489,86 @@ function score(fixtures, responses) {
   }
 }
 
-const args = parseArgs(process.argv.slice(2))
-const { fixtures, manifest } = await load()
+/**
+ * True when this file is the process entry point rather than an imported
+ * module, so the extraction and scoring helpers can be imported and checked
+ * directly (see the fix report's real-output proof) without the CLI driver
+ * running and exiting the process.
+ */
+const invokedDirectly = (() => {
+  if (process.argv[1] === undefined) return false
+  try {
+    return realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)
+  } catch {
+    return false
+  }
+})()
 
-if (args.flags.has('--write-manifest')) {
-  await writeManifest(fixtures)
-  process.exit(0)
+if (invokedDirectly) {
+  const args = parseArgs(process.argv.slice(2))
+  const { fixtures, manifest } = await load()
+
+  if (args.flags.has('--write-manifest')) {
+    await writeManifest(fixtures)
+    process.exit(0)
+  }
+
+  const problems = verify(fixtures, manifest)
+  if (problems.length > 0) {
+    for (const problem of problems) process.stderr.write(`benchmark: ${problem}\n`)
+    process.exit(1)
+  }
+  process.stdout.write(
+    `benchmark: verified ${fixtures.length} fixtures against benchmarks/manifest.json (${SUITE_REVISION})\n`,
+  )
+
+  if (args.flags.has('--verify-fixtures')) process.exit(0)
+
+  const missing = ['backend', 'model', 'effort', 'version'].filter(key => args[key] === undefined)
+  if (missing.length > 0) {
+    fail(`refusing to run: select an explicit route with ${missing.map(key => `--${key} <value>`).join(' ')}`)
+  }
+  if (args.version.trim() === '') {
+    // R22: an empty backend version can never be admissible evidence, so writing
+    // such a record would only produce a file the router must refuse.
+    fail('refusing to run: --version must name the exact backend version the run measured (an empty version is never admissible evidence)')
+  }
+  const argv = commandArgv(args)
+  if (args.responses === undefined && argv === undefined) {
+    fail('refusing to run: pass --responses <file> for a recorded run, or --command <executable> [--arg <value> …] / --command-json <json argv> to invoke the selected route')
+  }
+  if (args.responses !== undefined && argv !== undefined) {
+    fail('refusing to run: pass either --responses or --command/--command-json, not both')
+  }
+
+  let outcome
+  try {
+    outcome = await collect(fixtures, args, argv)
+  } catch (error) {
+    fail(`the selected route run failed: ${String(error?.message ?? error)}`)
+  }
+  const { responses, latencyMs } = outcome
+  const result = score(fixtures, responses)
+  const date = args.date ?? new Date().toISOString()
+  const record = {
+    id: `${args.backend}:${args.model}:${args.effort}:${date}`,
+    suiteRevision: SUITE_REVISION,
+    backend: args.backend,
+    model: args.model,
+    effort: args.effort,
+    backendVersion: args.version,
+    date,
+    scope: SCOPE,
+    detectionScore: result.detectionScore,
+    falsePositiveScore: result.falsePositiveScore,
+    latencyMs: numeric(args, 'latency-ms', latencyMs),
+    costUsd: numeric(args, 'cost-usd', 0),
+    perFixture: result.perFixture,
+  }
+  const out = args.out ?? join(ROOT, 'benchmarks', 'evidence', `${record.id.replace(/[^a-zA-Z0-9._:-]+/g, '_')}.json`)
+  await mkdir(dirname(out), { recursive: true })
+  await writeFile(out, `${JSON.stringify(record, null, 2)}\n`)
+  process.stdout.write(`benchmark: wrote evidence for ${record.backend}/${record.model}/${record.effort} to ${out}\n`)
 }
 
-const problems = verify(fixtures, manifest)
-if (problems.length > 0) {
-  for (const problem of problems) process.stderr.write(`benchmark: ${problem}\n`)
-  process.exit(1)
-}
-process.stdout.write(
-  `benchmark: verified ${fixtures.length} fixtures against benchmarks/manifest.json (${SUITE_REVISION})\n`,
-)
-
-if (args.flags.has('--verify-fixtures')) process.exit(0)
-
-const missing = ['backend', 'model', 'effort', 'version'].filter(key => args[key] === undefined)
-if (missing.length > 0) {
-  fail(`refusing to run: select an explicit route with ${missing.map(key => `--${key} <value>`).join(' ')}`)
-}
-if (args.version.trim() === '') {
-  // R22: an empty backend version can never be admissible evidence, so writing
-  // such a record would only produce a file the router must refuse.
-  fail('refusing to run: --version must name the exact backend version the run measured (an empty version is never admissible evidence)')
-}
-const argv = commandArgv(args)
-if (args.responses === undefined && argv === undefined) {
-  fail('refusing to run: pass --responses <file> for a recorded run, or --command <executable> [--arg <value> …] / --command-json <json argv> to invoke the selected route')
-}
-if (args.responses !== undefined && argv !== undefined) {
-  fail('refusing to run: pass either --responses or --command/--command-json, not both')
-}
-
-let outcome
-try {
-  outcome = await collect(fixtures, args, argv)
-} catch (error) {
-  fail(`the selected route run failed: ${String(error?.message ?? error)}`)
-}
-const { responses, latencyMs } = outcome
-const result = score(fixtures, responses)
-const date = args.date ?? new Date().toISOString()
-const record = {
-  id: `${args.backend}:${args.model}:${args.effort}:${date}`,
-  suiteRevision: SUITE_REVISION,
-  backend: args.backend,
-  model: args.model,
-  effort: args.effort,
-  backendVersion: args.version,
-  date,
-  scope: SCOPE,
-  detectionScore: result.detectionScore,
-  falsePositiveScore: result.falsePositiveScore,
-  latencyMs: numeric(args, 'latency-ms', latencyMs),
-  costUsd: numeric(args, 'cost-usd', 0),
-  perFixture: result.perFixture,
-}
-const out = args.out ?? join(ROOT, 'benchmarks', 'evidence', `${record.id.replace(/[^a-zA-Z0-9._:-]+/g, '_')}.json`)
-await mkdir(dirname(out), { recursive: true })
-await writeFile(out, `${JSON.stringify(record, null, 2)}\n`)
-process.stdout.write(`benchmark: wrote evidence for ${record.backend}/${record.model}/${record.effort} to ${out}\n`)
+export { extractAssistantText, findingsOf, safeExcerpt }

@@ -9,8 +9,11 @@
  *
  * - the prompts land in fixture order, so a test can pair each one with the
  *   fixture it was built from;
- * - it reports no findings and exits 0, so capturing a run never changes the
- *   scoring path it is observed alongside.
+ * - it reports no findings by writing a valid, extractable empty report — a
+ *   Codex `--json` stream whose `agent_message` text is empty — so capturing a
+ *   run never changes the scoring path it is observed alongside. (A stub that
+ *   wrote nothing at all would now be the unextractable-output failure the
+ *   runner must refuse, which would make capture impossible.)
  */
 
 import { appendFileSync } from 'node:fs'
@@ -24,4 +27,7 @@ process.stdin.on('data', chunk => {
 })
 process.stdin.on('end', () => {
   appendFileSync(out, `${JSON.stringify(input)}\n`)
+  process.stdout.write(`${JSON.stringify({ type: 'thread.started', thread_id: 'benchmark-prompt-capture' })}\n`)
+  process.stdout.write(`${JSON.stringify({ type: 'item.completed', item: { id: 'item_0', type: 'agent_message', text: '' } })}\n`)
+  process.stdout.write(`${JSON.stringify({ type: 'turn.completed', usage: {} })}\n`)
 })

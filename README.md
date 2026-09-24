@@ -203,6 +203,26 @@ node scripts/benchmark.mjs \
   --command-json '["claude","--print"]'
 ```
 
+**Output formats the runner understands.** Before it looks for `FINDING:` lines,
+the runner reduces a spawned invocation's stdout to the assistant's accepted
+final text. Two shapes are understood:
+
+- **Codex `--json` JSONL** — one event object per stdout line. The answer is the
+  `text` of the `item.completed` event whose item type is `agent_message`, with
+  the newlines JSON escaped decoded; every non-assistant event is ignored. A
+  `turn.failed` or top-level `error` event fails that fixture's run.
+- **Plain text** — the whole stdout is the answer. This is what `claude --print`
+  emits at its default `--output-format text` (per `claude --help`; the CLI was
+  not invoked against a model to confirm, only its documented default was read),
+  and what `codex exec` emits without `--json`.
+
+An invocation that exits 0 but yields **no extractable assistant text fails the
+run** and writes no record; it is never scored as a zero-finding (clean) result.
+An extracted report that happens to be **empty still scores zero findings**,
+which is the correct reading for a clean fixture. The two are deliberately
+different outcomes, so a mis-specified `--command` fails loudly instead of
+silently producing an inadmissible zero.
+
 `--version` is required for a scoring run: an evidence record whose
 `backendVersion` is empty can never be admissible, so the runner refuses to
 write one. The runner never guesses a route, never calls a model on its own, and
