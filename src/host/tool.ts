@@ -39,6 +39,16 @@ import { OrcServiceError } from './service.js'
  */
 const ORC_SECTION_ORDER = 650
 
+/**
+ * The most characters of one question's text the tool readout states.
+ *
+ * The text is model-authored and unbounded, and it enters both the durable
+ * session log and, through the answer, another agent's context. The Supervisor
+ * is the one who puts the question to the human, so the readout has to carry
+ * the text; the bound keeps one raise from flooding either.
+ */
+const MAX_STATED_QUESTION_CHARS = 200
+
 /** The system-prompt section name ORC registers in one Agent scope. */
 export const ORC_SECTION_NAME = 'orc:policy'
 
@@ -56,7 +66,7 @@ Once ORC starts, this session is the Supervisor of an ORC run: the run's Lead ow
 The Lead and Peer children inherit this session's live provider, model, and effort, because a DSH child agent can only be given a DSH provider route. The configured **code route** — including the DeepSeek Flash v4.1 high default — therefore governs exactly one thing: an explicit \`dispatch\` with \`stage: "code"\`, which ORC routes and runs on that route. It does not move the Supervisor or the hierarchy.
 Review and security audit are separate stages, and the final branch review and audit are separate gates that ORC routes and dispatches itself. Every one of them runs on a route ORC selects, and ORC states the exact report format to the backend it dispatches to; a report you write is never accepted in place of the report the selected backend produced. Critical, high, and medium findings block until they are fixed and re-reviewed. A failed, malformed, missing, or unavailable review or audit is blocking and is never a clean result: a malformed report leaves the run blocked in its stage, so the same stage can be dispatched again once the cause is fixed.
 
-A Lead or Peer cannot ask the human: DSH refuses human interaction to any agent another agent owns, so \`ask_user_question\` is not available to them. A peer that needs a decision only the human can make raises it with \`action: "raise-question"\` and stops. While a question is open the run is parked — the review, the final review, and settlement of that task are all refused. Put the question to the human yourself, then answer it with \`action: "answer-question"\`; ORC delivers the answer to the peer that raised it.`
+A Lead or Peer cannot ask the human: DSH refuses human interaction to any agent another agent owns, so \`ask_user_question\` is not available to them. A peer that needs a decision only the human can make raises it with \`action: "raise-question"\` and stops; the lead owns no task, so it states any decision it needs in its final result instead. While a question is open the run is parked — the review, the final review, and settlement of that task are all refused. Put the question to the human yourself, then answer it with \`action: "answer-question"\`; ORC delivers the answer to the peer that raised it.`
 
 /** Every action the tool accepts. */
 const ACTIONS = [
@@ -117,7 +127,7 @@ const ORC_PARAMETERS = {
   taskId: { type: 'string', description: 'start-task/settle-task: the task identifier.' },
   questionId: {
     type: 'string',
-    description: 'answer-question: the id of the question to answer, as reported by status.',
+    description: 'answer-question: the id of the question to answer — the part before the first ":" in the question as reported by status.',
   },
   question: {
     type: 'string',
@@ -199,7 +209,9 @@ function valueOf(action: OrcAction, state: OrcState, risk: RiskDecision, message
     peers: [...state.peers],
     tasks: state.tasks.map(task => `${task.id}:${task.status}`),
     findings: state.findings.map(finding => `${finding.id}:${finding.severity}:${finding.status}`),
-    questions: state.questions.map(question => `${question.id}:${question.status}`),
+    questions: state.questions.map(question =>
+      `${question.id}:${question.status}:${question.question.replace(/\s+/g, ' ').slice(0, MAX_STATED_QUESTION_CHARS)}`,
+    ),
     taskGate: state.taskGate,
     finalReview: state.finalReview,
     finalAudit: state.finalAudit,

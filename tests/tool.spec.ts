@@ -435,7 +435,7 @@ describe('tool actions', () => {
       execFor(peer),
     )) as { questions: string[] }
     expect(value.questions).toHaveLength(1)
-    expect(value.questions[0]).toMatch(/:open$/)
+    expect(value.questions[0]).toMatch(/:open:which database\?$/)
   })
 
   it('answers a question as the supervisor and refuses a non-supervisor', async () => {
@@ -462,7 +462,7 @@ describe('tool actions', () => {
       { action: 'answer-question', questionId, answer: 'postgres' },
       execFor(agent),
     )) as { questions: string[] }
-    expect(answered.questions[0]).toBe(`${questionId}:answered`)
+    expect(answered.questions[0]).toBe(`${questionId}:answered:which database?`)
   })
 
   it('exposes open questions in every tool result', async () => {

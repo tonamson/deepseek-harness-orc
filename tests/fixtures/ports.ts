@@ -107,8 +107,17 @@ export interface FakeAgent extends Agent {
 /** The registered tool surface, plus a fixture-only listing reader. */
 export interface FakeTools {
   register(definition: ToolDefinition): () => void
-  get(name: string): ToolDefinition | undefined
-  /** Fixture-only: the real `ToolRuntime` exposes `schemas()`/`get()`, not `list()`. */
+  /**
+   * Own registrations first, then preset-plane grants, then the parent's
+   * registry. The scope argument is ignored: the fixture models one chain.
+   */
+  get(name: string, scope?: object): ToolDefinition | undefined
+  /**
+   * Fixture-only: pretend a preset registered one tool in this scope's
+   * composition, so a child created under it inherits the tool.
+   */
+  grant(name: string): () => void
+  /** Fixture-only: this scope's own registrations; the real `ToolRuntime` exposes `schemas()`/`get()`, not `list()`. */
   list(): ToolDefinition[]
   schemas(): { name: string; description: string; parameters: Record<string, unknown> }[]
 }
@@ -151,8 +160,10 @@ export function fakeAgent(options: {
   session: Session
   agents: { get(id: SessionId): Agent | undefined }
   options?: AgentOptions
+  /** The parent's registry a child joins, as `composeFrom` joins a preset. */
+  inherits?: FakeTools
 }): FakeAgent {
-  const tools = fakeTools()
+  const tools = fakeTools(options.inherits)
   const systemPrompt = fakeSystemPrompt()
   const listeners: ((payload: FakePreStep, next: () => Promise<PreStepDecision>) => Promise<PreStepDecision>)[] = []
   const agent = {
@@ -184,9 +195,17 @@ export function fakeAgent(options: {
   return agent
 }
 
-/** A tool registry with the real registration contract plus fixture readers. */
-function fakeTools(): FakeTools {
+/**
+ * A tool registry with the real registration contract plus fixture readers.
+ *
+ * Two planes, mirroring the real scope chain: `register` is an agent-plane
+ * registration (an agent's own layer, which its children do NOT inherit — the
+ * ORC tool itself), while `grant` stands in for a preset-plane tool, which a
+ * child joins through `composeFrom` and therefore inherits from `inherits`.
+ */
+function fakeTools(inherits?: FakeTools): FakeTools {
   const definitions = new Map<string, ToolDefinition>()
+  const presets = new Map<string, ToolDefinition>()
   return {
     register: (definition) => {
       definitions.set(definition.name, definition)
@@ -194,7 +213,13 @@ function fakeTools(): FakeTools {
         definitions.delete(definition.name)
       }
     },
-    get: name => definitions.get(name),
+    get: name => definitions.get(name) ?? presets.get(name) ?? inherits?.get(name),
+    grant: (name) => {
+      presets.set(name, { name } as ToolDefinition)
+      return () => {
+        presets.delete(name)
+      }
+    },
     list: () => [...definitions.values()],
     schemas: () => [...definitions.values()].map(definition => ({
       name: definition.name,
@@ -523,6 +548,7 @@ function fakeSubagents(deps: { agents: OrcAgentPort & { live: Map<string, FakeAg
         role: spec.label === ORC_LEAD_LABEL ? 'lead' : 'peer',
         session: session(childId, String(spec.request.parent.id)),
         agents: deps.agents,
+        inherits: (spec.request.parent.ctx as unknown as FakeAgentContext).tools,
         ...spec.request.agentOptions === undefined ? {} : { options: spec.request.agentOptions },
       })
       children.set(childId, child)

@@ -420,7 +420,14 @@ function fakeDeployment(serviceModule, workflowModule, journalModule, reports) {
       ? supervisorSession
       : Session.create(SessionId(id), undefined, { version: SESSION_FORMAT_VERSION, id: SessionId(id), createdAt: 0, isSeeded: false, parentSession: SessionId('session-supervisor') }),
     options,
-    ctx: { agents: { get: (sessionId) => live.get(String(sessionId)) } },
+    ctx: {
+      agents: { get: (sessionId) => live.get(String(sessionId)) },
+      // The profile this harness boots composes the standard preset, which
+      // registers `ask_user_question`; ORC probes the parent's registry before
+      // it denies the tool to a child, so the fake parent states the same
+      // registry the real one would.
+      tools: { get: (name) => name === 'ask_user_question' ? { name } : undefined },
+    },
   })
   const supervisor = fakeAgent('session-supervisor', { provider: 'deepseek', model: 'deepseek-v4.1-flash' })
   live.set('session-supervisor', supervisor)

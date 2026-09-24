@@ -1441,8 +1441,24 @@ it('denies the human-question tool to every ORC child', async () => {
   const ports = fakePorts()
   const service = new OrcService(ports)
   await toImplement(ports, service)
+  // Only some agent presets register the tool; this is the profile that has it,
+  // so the child start must carry the denial.
+  ports.supervisor.ctx.tools.grant('ask_user_question')
   await service.createLead(ports.supervisor)
   expect(ports.subagents.starts[0]?.toolFilter).toEqual({ deny: ['ask_user_question'] })
+})
+
+it('starts a child with no tool filter where the profile does not register the tool', async () => {
+  const ports = fakePorts()
+  const service = new OrcService(ports)
+  await toImplement(ports, service)
+  // `tools.restrict()` throws on an unknown name, so a preset that omits
+  // `ask_user_question` — the shipped `minimal` preset, or a user-authored one —
+  // must not be handed a filter it cannot honor.
+  await service.createLead(ports.supervisor)
+  expect(ports.subagents.starts).toHaveLength(1)
+  expect(ports.subagents.starts[0]?.label).toBe(ORC_LEAD_LABEL)
+  expect(ports.subagents.starts[0]?.toolFilter).toBeUndefined()
 })
 
 it('refuses to create a child when the provider cannot restrict its tools', async () => {
@@ -1451,6 +1467,7 @@ it('refuses to create a child when the provider cannot restrict its tools', asyn
   await toImplement(ports, service)
   ports.subagents.setToolFilter(false)
   await expect(service.createLead(ports.supervisor)).rejects.toThrow(/cannot restrict child tools/)
+  expect(ports.journal.events.at(-1)!.type).toBe('orc/fail')
 })
 
 it('records a peer question and delivers the Supervisor answer to that peer', async () => {

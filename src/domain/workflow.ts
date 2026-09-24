@@ -359,7 +359,7 @@ const TRANSITIONS: TransitionTable = {
   },
   'question-raise': {
     roles: ['peer'],
-    from: ['implement'],
+    from: NON_TERMINAL_PHASES,
     apply: (state, event) => {
       const task = state.tasks.find(candidate => candidate.id === event.taskId)
       if (!task) throw new WorkflowError(`unknown task ${event.taskId}`)

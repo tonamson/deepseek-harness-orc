@@ -102,16 +102,31 @@ export const ORC_CHILD_PROVIDER = 'spawn'
 export const ORC_CHILD_DENIED_TOOLS: ToolRestriction = { deny: ['ask_user_question'] }
 
 /**
- * What every ORC child is told about human interaction.
+ * What every ORC peer is told about human interaction.
  *
  * The tool filter above is the guarantee; this text exists so a child that
- * needs a decision knows where to put it instead of guessing.
+ * needs a decision knows where to put it instead of guessing. The Lead owns no
+ * task, so it gets its own contract — {@link ORC_LEAD_QUESTION_CONTRACT}.
  */
 export const ORC_CHILD_QUESTION_CONTRACT =
   'You are a DSH child agent, so you cannot ask the human a question: `ask_user_question` is not available to you. ' +
   'When you need a decision only the human can make, call the `orc` tool with action "raise-question" (taskId, question) and then stop and wait; ' +
   'the Supervisor answers it and the answer arrives in your inbox. ' +
   'Do not guess on a decision that changes scope, risk, or an irreversible outcome; raise it instead.'
+
+/**
+ * What the run's Lead is told about human interaction.
+ *
+ * The Lead owns no task, so it cannot raise an ORC question: a raise resolves
+ * its peer through the task's owner, so a lead that raised one anyway would
+ * attribute it to that peer and the answer would be delivered to the peer while
+ * the lead waited for it. DSH's own guidance for an owned child is the lead's
+ * path: state the decision in the final result.
+ */
+export const ORC_LEAD_QUESTION_CONTRACT =
+  'You are a DSH child agent, so you cannot ask the human a question: `ask_user_question` is not available to you. ' +
+  'You own no task in this run, so you cannot raise an ORC question either: when you need a decision only the human can make, state it in your final result, which is how a delegated child reports what it could not resolve. ' +
+  'A Peer that owns a task raises its own question; do not raise one on its behalf.'
 
 /**
  * The classification every final branch gate routes under.
@@ -1705,6 +1720,16 @@ export class OrcService {
           `the DSH subagent provider "${ORC_CHILD_PROVIDER}" cannot restrict child tools, so ORC cannot guarantee its children never ask the human`,
         )
       }
+      // The denial only means something when the profile actually registers the
+      // tool: `tools.restrict()` rejects an unknown name, so a preset that omits
+      // `ask_user_question` — the `minimal` preset, or a user-authored one —
+      // would fail every child start opaquely. The probe reads the parent's own
+      // view, which is the composition the child joins and inherits from, so a
+      // tool absent there is absent for the child and the guarantee holds
+      // vacuously. It is never dropped silently: a tool present in the parent's
+      // view still carries the filter, and a provider that cannot restrict is
+      // refused above whatever the probe finds.
+      const needsDeny = parent.ctx.tools.get('ask_user_question', parent) !== undefined
       const started = await subagents.startContinuable({
         provider: ORC_CHILD_PROVIDER,
         label,
@@ -1714,10 +1739,10 @@ export class OrcService {
           prompt: [
             {
               type: 'text',
-              text: `${label} (${idOf(childId)}) owns work delegated by ORC run ${runId}.\n\n${ORC_CHILD_QUESTION_CONTRACT}`,
+              text: `${label} (${idOf(childId)}) owns work delegated by ORC run ${runId}.\n\n${label === ORC_LEAD_LABEL ? ORC_LEAD_QUESTION_CONTRACT : ORC_CHILD_QUESTION_CONTRACT}`,
             },
           ],
-          toolFilter: ORC_CHILD_DENIED_TOOLS,
+          ...needsDeny ? { toolFilter: ORC_CHILD_DENIED_TOOLS } : {},
           ...this.childOptions(parent),
         },
         signal: this.lifetime.signal,

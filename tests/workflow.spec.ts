@@ -465,6 +465,27 @@ it('still settles a task that carries no open question', () => {
   expect(state.questions[0]?.status).toBe('open')
 })
 
+it('raises a question from a peer whose task is still started while the run is in review', () => {
+  const base = validEvents().slice(0, 7)
+  const secondPeer = event('peer-create', 'lead', { peerId: 'peer-2' })
+  const secondTask = event('task-start', 'lead', { taskId: 'task-2', peerId: 'peer-2' })
+  // Peer-1 settles and the lead requests review while peer-2 is still started:
+  // `review-request` gates on open questions and blocking findings, not on every
+  // task being settled, so a peer can be mid-task outside `implement`.
+  const state = replay([
+    ...base,
+    secondPeer,
+    event('task-start', 'lead'),
+    secondTask,
+    event('task-settle', 'peer'),
+    event('review-request', 'lead'),
+    event('question-raise', 'peer', { actorId: 'peer-2', taskId: 'task-2', questionId: 'q-2' }),
+  ])
+  expect(state.phase).toBe('review')
+  expect(state.tasks.find(task => task.id === 'task-2')?.status).toBe('started')
+  expect(state.questions[0]).toMatchObject({ id: 'q-2', taskId: 'task-2', peerId: 'peer-2', status: 'open' })
+})
+
 it('refuses completion while a question is open', () => {
   const complete = replay(validEvents())
   expect(canComplete(complete)).toBe(true)

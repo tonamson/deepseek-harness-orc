@@ -127,6 +127,16 @@ describe('extension contracts the bundle depends on', () => {
     expect(declaration('@deepseek-ai/dsh-subprocess', 'index.d.ts')).toContain('spawn(spec: SubprocessSpawnSpec): SubprocessHandle')
   })
 
+  it('reads the child tool filter and the steer seam the question channel depends on', () => {
+    // The tool filter is the hard guarantee that no ORC child can ask the human;
+    // `sendMessage` is the whole delivery path back to a peer that raised one.
+    const types = declaration('@deepseek-ai/dsh-subagent', 'types.d.ts')
+    expect(types).toContain('readonly toolFilter: boolean;')
+    expect(types).toContain('readonly toolFilter?: ToolRestriction;')
+    expect(declaration('@deepseek-ai/dsh-subagent', 'index.d.ts'))
+      .toContain('sendMessage(sender: Agent, targetId: SessionId, content: ContentBlock[], options: SubagentSendMessageOptions): Promise<MessageId>')
+  })
+
   it('reads the Typert remote seams the Remote host row uses', () => {
     const typert = declaration('@deepseek-ai/dsh-typert-protocol', 'index.d.ts')
     expect(typert).toContain('export declare abstract class TypertRemoteService')
