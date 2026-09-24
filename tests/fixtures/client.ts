@@ -8,7 +8,8 @@
  *   it caches its snapshot (React's `useSyncExternalStore` contract), records
  *   every revision-fenced `set`/`unset` with the namespace it targeted, and
  *   notifies subscribers, so a page that skipped the write path or wrote
- *   outside `orc` is caught here.
+ *   outside `orc` is caught here. `failNextWrite` makes the next write reject
+ *   the way the Host transport does, so a refusal is testable too.
  * - {@link fakeRemote} is the injectable ORC remote port. It records every
  *   probe and returns the host-shaped `OrcConnection` a real Remote face
  *   returns; a test overrides `catalog`, `probe`, or `recorded` to drive one
@@ -50,6 +51,8 @@ export interface FakeScope {
   value(): OrcConfig
   /** Replace the resolved value and notify subscribers, as a host push would. */
   push(next: OrcConfig): void
+  /** Make the next `set`/`unset` reject with this error instead of applying. */
+  failNextWrite(error: Error): void
 }
 
 /** The provider code route the fixture config defaults to. */
@@ -144,6 +147,7 @@ export function fakeScope(namespace: string, initial: OrcConfig = fixtureConfig(
   const writes: ScopeWrite[] = []
   let value = initial
   let revision = 1
+  let failure: Error | undefined
   let snapshot: SettingsScopeSnapshot<OrcConfig> = {
     status: 'ready',
     value,
@@ -161,6 +165,17 @@ export function fakeScope(namespace: string, initial: OrcConfig = fixtureConfig(
     for (const listener of [...listeners]) listener()
   }
 
+  /**
+   * Refuse one write exactly as the Host transport does: nothing is applied,
+   * nothing is recorded, and the caller's promise rejects.
+   */
+  const refuse = (): void => {
+    if (failure === undefined) return
+    const error = failure
+    failure = undefined
+    throw error
+  }
+
   const scope: SettingsScope<OrcConfig> = {
     getSnapshot: () => snapshot,
     subscribe: (listener) => {
@@ -170,11 +185,13 @@ export function fakeScope(namespace: string, initial: OrcConfig = fixtureConfig(
       }
     },
     set: async (field, fieldValue) => {
+      refuse()
       writes.push({ namespace, field, value: fieldValue })
       value = { ...value, [field]: fieldValue }
       publish()
     },
     unset: async (field) => {
+      refuse()
       writes.push({ namespace, field, cleared: true })
       const next = { ...value } as Record<string, unknown>
       delete next[field]
@@ -194,6 +211,9 @@ export function fakeScope(namespace: string, initial: OrcConfig = fixtureConfig(
     push: (next) => {
       value = next
       publish()
+    },
+    failNextWrite: (error) => {
+      failure = error
     },
   }
 }

@@ -134,13 +134,21 @@ export const hostRouteKey = (route: Route): string => route.kind === 'provider'
   ? routeToken(route)
   : `cli:${routeToken(route)}`
 
-/** Parse one {@link routeToken} back into a route, or `undefined` when malformed. */
+/**
+ * Parse one {@link routeToken} back into a route, or `undefined` when malformed.
+ *
+ * Every segment after the kind must be non-empty: the host rejects an empty
+ * provider, model, or effort, so accepting one here would let the page claim a
+ * route was allowlisted that the write then refused.
+ */
 export function parseRouteToken(token: string): Route | undefined {
   const parts = token.split(':')
-  if (parts[0] === 'provider' && parts.length === 4) {
+  const segments = parts.slice(1)
+  const filled = segments.length > 0 && segments.every(segment => segment !== '')
+  if (parts[0] === 'provider' && parts.length === 4 && filled) {
     return { kind: 'provider', provider: parts[1], model: parts[2], effort: parts[3] }
   }
-  if ((parts[0] === 'codex' || parts[0] === 'claude') && parts.length === 3) {
+  if ((parts[0] === 'codex' || parts[0] === 'claude') && parts.length === 3 && filled) {
     return { kind: 'cli', cli: parts[0], model: parts[1], effort: parts[2] }
   }
   return undefined
@@ -303,7 +311,9 @@ export function OrcSettingsPage(props: OrcSettingsPageProps): ReactElement {
   const [probing, setProbing] = useState(false)
   const [entry, setEntry] = useState('')
   const [entryProblem, setEntryProblem] = useState<RouteEntryProblem | undefined>(undefined)
+  const [entryFailure, setEntryFailure] = useState<string | undefined>(undefined)
   const [entryAdded, setEntryAdded] = useState<string | undefined>(undefined)
+  const [writeError, setWriteError] = useState<string | undefined>(undefined)
   const probeController = useRef<AbortController | undefined>(undefined)
 
   useEffect(() => () => probeController.current?.abort(), [])
@@ -363,9 +373,33 @@ export function OrcSettingsPage(props: OrcSettingsPageProps): ReactElement {
     setSaved(false)
   }
 
+  /**
+   * Perform one scope write, resolving to the actionable copy of a refusal.
+   *
+   * Every control writes fire-and-forget, but the host can refuse a write it
+   * cannot accept. A rejection must never read as success, so the caller gets
+   * the refusal (or `undefined` on success) and decides what not to claim; the
+   * reason is the bounded, credential-free message the host supplied.
+   */
+  const write = async (run: () => Promise<void>): Promise<string | undefined> => {
+    try {
+      await run()
+      return undefined
+    } catch (error: unknown) {
+      return t('writeFailed', { message: messageOf(error, t) })
+    }
+  }
+
+  /** Run one control write, clearing the previous refusal or showing the new one. */
+  const fire = (run: () => Promise<void>): void => {
+    void write(run).then(failure => {
+      setWriteError(failure)
+    })
+  }
+
   const writeStage = (stageName: AnalysisStage, token: string): void => {
     const route = token === '' ? undefined : parseRouteToken(token)
-    void scope.set('manual', { ...config.manual, [stageName]: route })
+    fire(() => scope.set('manual', { ...config.manual, [stageName]: route }))
   }
 
   /**
@@ -379,7 +413,7 @@ export function OrcSettingsPage(props: OrcSettingsPageProps): ReactElement {
    */
   const writeAllowed = (route: Route, enabled: boolean): void => {
     if (enabled) {
-      void scope.set('allowed', [...config.allowed, route])
+      fire(() => scope.set('allowed', [...config.allowed, route]))
       return
     }
     const token = routeToken(route)
@@ -392,8 +426,8 @@ export function OrcSettingsPage(props: OrcSettingsPageProps): ReactElement {
         cleared = true
       }
     }
-    if (cleared) void scope.set('manual', nextManual)
-    void scope.set('allowed', config.allowed.filter(entry => routeToken(entry) !== token))
+    if (cleared) fire(() => scope.set('manual', nextManual))
+    fire(() => scope.set('allowed', config.allowed.filter(entry => routeToken(entry) !== token)))
   }
 
   const onProbe = async (): Promise<void> => {
@@ -420,9 +454,10 @@ export function OrcSettingsPage(props: OrcSettingsPageProps): ReactElement {
    * configuration is empty and whose catalog is therefore empty can still add
    * its first provider or CLI route, which is what every other control needs.
    * The token is validated here before it reaches the host, which validates it
-   * again on write.
+   * again on write — so the success line is shown only after that write
+   * settles, and a refusal is rendered instead of it.
    */
-  const onAddRoute = (): void => {
+  const onAddRoute = async (): Promise<void> => {
     const token = entry.trim()
     if (token === '') {
       setEntryProblem('routeEntryEmpty')
@@ -438,9 +473,15 @@ export function OrcSettingsPage(props: OrcSettingsPageProps): ReactElement {
       return
     }
     setEntryProblem(undefined)
+    setEntryAdded(undefined)
+    const failure = await write(() => scope.set('allowed', [...config.allowed, route]))
+    if (failure !== undefined) {
+      setEntryFailure(failure)
+      return
+    }
+    setEntryFailure(undefined)
     setEntryAdded(routeLabel(route))
     setEntry('')
-    writeAllowed(route, true)
   }
 
   const onSave = async (): Promise<void> => {
@@ -449,13 +490,21 @@ export function OrcSettingsPage(props: OrcSettingsPageProps): ReactElement {
     else cliPaths.codex = staged.codex.trim()
     if (staged.claude.trim() === '') delete cliPaths.claude
     else cliPaths.claude = staged.claude.trim()
-    await scope.set('cliPaths', cliPaths)
-    await scope.set('catalogMaxAgeDays', Number(staged.age.trim()))
-    if (staged.maxCost.trim() === '') {
-      if (config.maxCostUsd !== undefined) await scope.unset('maxCostUsd')
-    } else {
-      await scope.set('maxCostUsd', Number(staged.maxCost.trim()))
+    const failure = await write(async () => {
+      await scope.set('cliPaths', cliPaths)
+      await scope.set('catalogMaxAgeDays', Number(staged.age.trim()))
+      if (staged.maxCost.trim() === '') {
+        if (config.maxCostUsd !== undefined) await scope.unset('maxCostUsd')
+      } else {
+        await scope.set('maxCostUsd', Number(staged.maxCost.trim()))
+      }
+    })
+    if (failure !== undefined) {
+      setSaved(false)
+      setWriteError(failure)
+      return
     }
+    setWriteError(undefined)
     setDraft(undefined)
     setSaved(true)
   }
@@ -490,7 +539,7 @@ export function OrcSettingsPage(props: OrcSettingsPageProps): ReactElement {
           id="orc-session-mode"
           value={config.sessionMode}
           onChange={event => {
-            void scope.set('sessionMode', event.target.value)
+            fire(() => scope.set('sessionMode', event.target.value))
             setSaved(false)
           }}
         >
@@ -506,8 +555,10 @@ export function OrcSettingsPage(props: OrcSettingsPageProps): ReactElement {
           value={config.codeRoute === undefined ? '' : routeToken(config.codeRoute)}
           onChange={event => {
             const route = parseRouteToken(event.target.value)
-            if (route === undefined) void scope.unset('codeRoute')
-            else void scope.set('codeRoute', route)
+            fire(async () => {
+              if (route === undefined) await scope.unset('codeRoute')
+              else await scope.set('codeRoute', route)
+            })
             setSaved(false)
           }}
         >
@@ -603,11 +654,13 @@ export function OrcSettingsPage(props: OrcSettingsPageProps): ReactElement {
             onChange={event => {
               setEntry(event.target.value)
               setEntryProblem(undefined)
+              setEntryFailure(undefined)
             }}
           />
-          <button type="button" onClick={onAddRoute}>{t('routeEntryAdd')}</button>
+          <button type="button" onClick={() => { void onAddRoute() }}>{t('routeEntryAdd')}</button>
         </p>
         {entryProblem === undefined ? null : <p>{t(entryProblem)}</p>}
+        {entryFailure === undefined ? null : <p>{entryFailure}</p>}
         {entryAdded === undefined ? null : <p>{t('routeEntryAdded', { route: entryAdded })}</p>}
       </fieldset>
 
@@ -731,6 +784,7 @@ export function OrcSettingsPage(props: OrcSettingsPageProps): ReactElement {
         <span>{t('saveHint')}</span>
         {problem === undefined ? null : <span>{t(problem)}</span>}
         {saved ? <span>{t('saved')}</span> : null}
+        {writeError === undefined ? null : <span>{writeError}</span>}
       </p>
     </section>
   )

@@ -188,12 +188,67 @@ describe('OrcSettingsPage', () => {
     expect(ui.getByText('A route reads provider:<provider>:<model>:<effort> or codex|claude:<model>:<effort>')).toBeVisible()
     expect(fake.writes).toHaveLength(1)
 
+    // An empty segment is malformed too: the host refuses it, so the page must
+    // refuse it before claiming the route was allowlisted.
+    for (const malformed of ['provider:::high', 'codex::high']) {
+      await user.clear(entry)
+      await user.type(entry, malformed)
+      await user.click(ui.getByRole('button', { name: 'Allowlist route' }))
+      expect(ui.getByText('A route reads provider:<provider>:<model>:<effort> or codex|claude:<model>:<effort>')).toBeVisible()
+    }
+    expect(fake.writes).toHaveLength(1)
+
     // An already allowed route is refused too, so the allowlist cannot repeat.
     await user.clear(entry)
     await user.type(entry, 'provider:bai:deepseek-v4.1-flash:high')
     await user.click(ui.getByRole('button', { name: 'Allowlist route' }))
     expect(ui.getByText('That route is already on the allowlist')).toBeVisible()
     expect(fake.writes).toHaveLength(1)
+  })
+
+  it('reports a refused write instead of claiming the route was allowlisted', async () => {
+    const user = userEvent.setup()
+    const fake = fakeScope('orc')
+    const ui = render(<OrcSettingsPage scope={fake.scope} remote={fakeRemote()} locale="en" />)
+
+    fake.failNextWrite(new Error('settings write refused: unknown route'))
+    await user.type(ui.getByLabelText('Route'), 'provider:bai:deepseek-v4.1-flash:high')
+    await user.click(ui.getByRole('button', { name: 'Allowlist route' }))
+
+    expect(await ui.findByText('The host refused the change: settings write refused: unknown route')).toBeVisible()
+    expect(ui.queryByText('Allowlisted bai deepseek-v4.1-flash high')).toBeNull()
+    expect(fake.writes).toEqual([])
+    expect(fake.value().allowed).toEqual(fixtureConfig().allowed)
+  })
+
+  it('reports a refused save instead of showing Saved', async () => {
+    const user = userEvent.setup()
+    const fake = fakeScope('orc')
+    const ui = render(<OrcSettingsPage scope={fake.scope} remote={fakeRemote()} locale="en" />)
+
+    await user.type(ui.getByLabelText('Codex CLI path'), '/opt/codex')
+    await user.click(ui.getByRole('button', { name: 'Save' }))
+    await ui.findByText('Saved')
+
+    fake.failNextWrite(new Error('settings write refused: read-only document'))
+    await user.type(ui.getByLabelText('Codex CLI path'), '-2')
+    await user.click(ui.getByRole('button', { name: 'Save' }))
+
+    expect(await ui.findByText('The host refused the change: settings write refused: read-only document')).toBeVisible()
+    expect(ui.queryByText('Saved')).toBeNull()
+    expect(fake.writes.map(write => write.field)).toEqual(['cliPaths', 'catalogMaxAgeDays'])
+  })
+
+  it('reports a refused control write on the page', async () => {
+    const user = userEvent.setup()
+    const fake = fakeScope('orc')
+    const ui = render(<OrcSettingsPage scope={fake.scope} remote={fakeRemote()} locale="en" />)
+
+    fake.failNextWrite(new Error('settings write refused: manual.review'))
+    await user.selectOptions(ui.getByLabelText('Review route'), 'codex:gpt-6-sol:high')
+
+    expect(await ui.findByText('The host refused the change: settings write refused: manual.review')).toBeVisible()
+    expect(fake.writes).toEqual([])
   })
 
   it('displays the exact failure code and diagnostic a probe returned', async () => {
