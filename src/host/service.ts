@@ -36,6 +36,12 @@
  *   keeps its phase and its pending request, the refusal is committed as
  *   `orc/report-rejected`, and re-dispatching the same stage resumes that
  *   request. A refusal is never a clean result and never unblocks completion.
+ * - The report contract also states the finding ids the run has already
+ *   recorded, because the reducer enforces run-level id uniqueness: a fresh
+ *   review or audit is told which ids are taken and must use a fresh one. The
+ *   list is read from the committed state at dispatch time and is capped, with
+ *   the truncation stated, so the contract never implies a completeness it
+ *   does not have.
  * - Every route decision is logged, credential-free, before the run it
  *   authorizes, and the committed decisions are what recovery reads back.
  * - Any child startup, route, or dispatch failure appends the reducer's only
@@ -108,6 +114,9 @@ export const orcPeerLabel = (name: string): string => `ORC peer ${name}`
  * prose, and prose is a malformed report. The caller's prompt stays the work;
  * this text is appended by the service, so the Supervisor never has to
  * reproduce a schema that could drift from the parser.
+ *
+ * This is the format half only. {@link reportContract} composes it with the
+ * run's already-used finding ids, which is what a dispatch actually sends.
  */
 export const REPORT_CONTRACT = `## Report format (required)
 Answer with exactly one JSON object and nothing else: no prose, no summary, no markdown, no code fences, and no commentary before or after it.
@@ -118,7 +127,7 @@ The shape is:
 - "status" is exactly "clean" or "findings".
 - "findings" is an array of finding objects. "clean" requires it to be empty; "findings" requires at least one finding.
 - Every finding has exactly these six fields and no others:
-  - "id": a unique, non-empty string within this report.
+  - "id": a unique, non-empty string that is not already used in this run (see the already-used finding ids below).
   - "severity": exactly one of "critical", "high", "medium", "low", "info".
   - "file": the non-empty path of the file the finding is about.
   - "line": the non-negative integer line number.
@@ -126,23 +135,67 @@ The shape is:
   - "remediation": non-empty text describing what must change.
 - "critical", "high", and "medium" findings block the run until they are fixed and re-reviewed; "low" and "info" do not block.
 
-One finding looks like this:
+One finding looks like this (its id is illustrative; yours must be a fresh one):
 {"status":"findings","findings":[{"id":"F-1","severity":"high","file":"src/pay.ts","line":12,"evidence":"the amount is credited twice","remediation":"settle the payment once"}]}
 
 Return only that JSON object.`
 
 /**
+ * The most used finding ids ORC enumerates before it truncates the list.
+ *
+ * The contract has to stay readable, and a long run can accumulate far more
+ * findings than one backend needs to see. The enumeration is capped and the
+ * truncation is stated, so the contract never implies a completeness it does
+ * not have.
+ */
+export const MAX_STATED_FINDING_IDS = 20
+
+/**
+ * The run's already-used finding ids, stated to the backend it dispatches.
+ *
+ * Finding ids are unique across the whole run, not just within one report, and
+ * the reducer enforces that on every result. A fresh review or audit cannot
+ * know which ids earlier reports used unless ORC states them, so a model that
+ * would naturally answer `F-1` again is told the id is taken and must pick a
+ * fresh one. The list is capped at {@link MAX_STATED_FINDING_IDS}; a capped
+ * list says so and still requires an id that was never used in the run.
+ */
+export function usedFindingIdsContract(usedIds: readonly string[]): string {
+  const header = '## Already-used finding ids in this run'
+  const rule = 'Finding ids are unique across the whole run, not just within one report.'
+  if (usedIds.length === 0) {
+    return `${header}\n${rule} No finding ids have been recorded in this run yet, so any non-empty id you choose is free.`
+  }
+  const shown = usedIds.slice(0, MAX_STATED_FINDING_IDS)
+  const hidden = usedIds.length - shown.length
+  const list = hidden === 0
+    ? `The run has already recorded these finding ids: ${shown.join(', ')}.`
+    : `The run has already recorded these finding ids: ${shown.join(', ')} (truncated: ${hidden} further recorded id(s) are not shown).`
+  const instruction = hidden === 0
+    ? 'Every finding in your report must use an id that is not in that list.'
+    : 'Every finding in your report must use an id that is not in that list; because the list is truncated, choose an id that has not been used anywhere in this run.'
+  return `${header}\n${rule} ${list} ${instruction}`
+}
+
+/** The complete contract one review or audit dispatch states: format plus used ids. */
+export const reportContract = (usedIds: readonly string[]): string =>
+  `${REPORT_CONTRACT}\n\n${usedFindingIdsContract(usedIds)}`
+
+/**
  * The exact prompt one review or audit dispatch sends.
  *
  * The caller's prompt is the work; ORC appends the report contract it will
- * parse the answer against. `spec`, `plan`, and `code` answers are not parsed
- * as reports, so those stages receive the caller's prompt unchanged.
+ * parse the answer against, including the ids the run has already recorded so
+ * a fresh report can pick ids that are still free. `spec`, `plan`, and `code`
+ * answers are not parsed as reports, so those stages receive the caller's
+ * prompt unchanged.
  */
-export const reportPrompt = (prompt: string): string => `${prompt}\n\n${REPORT_CONTRACT}`
+export const reportPrompt = (prompt: string, usedIds: readonly string[] = []): string =>
+  `${prompt}\n\n${reportContract(usedIds)}`
 
 /** The prompt one analysis stage dispatch sends. */
-const stagePrompt = (stage: AnalysisStage, prompt: string): string =>
-  stage === 'review' || stage === 'audit' ? reportPrompt(prompt) : prompt
+const stagePrompt = (stage: AnalysisStage, prompt: string, usedIds: readonly string[]): string =>
+  stage === 'review' || stage === 'audit' ? reportPrompt(prompt, usedIds) : prompt
 
 /**
  * One ORC-owned, bounded reason for a refused report.
@@ -355,6 +408,15 @@ function balancedEnd(text: string, start: number): number {
 
 /** Distinct values, in first-seen order. */
 const unique = <T>(values: readonly T[]): T[] => [...new Set(values)]
+
+/**
+ * The finding ids one run has already recorded, in the order it recorded them.
+ *
+ * Read from the committed reducer state at the moment of dispatch, never from a
+ * cached copy: a review dispatched after a fix must see the up-to-date set, and
+ * the reducer's run-level uniqueness rule is exactly this list.
+ */
+const usedFindingIds = (state: OrcState): string[] => state.findings.map(finding => finding.id)
 
 /** Whether one route is a configured provider route. */
 const isProviderRoute = (route: Route): route is ProviderRoute => route.kind === 'provider'
@@ -729,7 +791,7 @@ export class OrcService {
       if (pending === undefined) {
         await this.commit(session, this.requestEvent(state, analysis, correlationId))
       }
-      const text = await this.runRoute(session, runId, decision, stagePrompt(analysis, prompt), signal)
+      const text = await this.runRoute(session, runId, decision, stagePrompt(analysis, prompt, usedFindingIds(state)), signal)
       let report: unknown
       try {
         report = this.stageReport(analysis, text)
@@ -865,7 +927,7 @@ export class OrcService {
         decision,
       })
       if (pending === undefined) await this.commit(session, request)
-      const text = await this.runRoute(session, runId, decision, stagePrompt(stage, prompt), signal)
+      const text = await this.runRoute(session, runId, decision, stagePrompt(stage, prompt, usedFindingIds(state)), signal)
       let report: unknown
       try {
         report = this.stageReport(stage, text)

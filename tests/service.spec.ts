@@ -15,7 +15,7 @@ import { RouteError } from '../src/domain/routing.js'
 import type { RouteDecision } from '../src/domain/routing.js'
 import type { OrcStartRecord } from '../src/host/journal.js'
 import { OrcService } from '../src/host/service.js'
-import { ORC_LEAD_LABEL, REPORT_CONTRACT, reportPrompt } from '../src/host/service.js'
+import { MAX_STATED_FINDING_IDS, ORC_LEAD_LABEL, REPORT_CONTRACT, reportPrompt } from '../src/host/service.js'
 import {
   FAKE_NOW,
   fakePorts,
@@ -40,6 +40,39 @@ const mediumReport = {
     evidence: 'double credit',
     remediation: 'settle once',
   }],
+}
+
+/** A findings report with one finding per given id, all at the given severity. */
+const findingsReport = (ids: readonly string[], severity = 'medium'): Record<string, unknown> => ({
+  status: 'findings',
+  findings: ids.map(id => ({
+    id,
+    severity,
+    file: 'src/pay.ts',
+    line: 12,
+    evidence: 'double credit',
+    remediation: 'settle once',
+  })),
+})
+
+/**
+ * The ids a composed report contract states as already used, or `[]` when the
+ * contract states none.
+ *
+ * A regression test reads the contract the run actually handed the backend and
+ * picks its next id from it, exactly as a model told the used ids would.
+ */
+const usedIdsFromContract = (prompt: string): string[] => {
+  const match = /The run has already recorded these finding ids: ([^.]+)\./.exec(prompt)
+  return match === null ? [] : match[1]!.split(', ')
+}
+
+/** The smallest `F-n` id not already used, the way a model picks a fresh id. */
+const freshFindingId = (used: readonly string[]): string => {
+  const taken = new Set(used)
+  let index = 1
+  while (taken.has(`F-${index}`)) index += 1
+  return `F-${index}`
 }
 
 const signal = new AbortController().signal
@@ -718,8 +751,8 @@ describe('blocking failures and gates', () => {
     expect(finalReview).toMatchObject({ stage: 'review', risk: { risk: 'high' } })
     expect(finalAudit).toMatchObject({ stage: 'audit', risk: { risk: 'high' } })
     expect(routeBackend(finalAudit.route)).not.toBe(routeBackend(finalReview.route))
-    expect(ports.clis.runs.filter(run => run.prompt === reportPrompt('final branch review'))).toHaveLength(1)
-    expect(ports.clis.runs.filter(run => run.prompt === reportPrompt('final branch audit'))).toHaveLength(1)
+    expect(ports.clis.runs.filter(run => run.prompt === reportPrompt('final branch review', ['F-1']))).toHaveLength(1)
+    expect(ports.clis.runs.filter(run => run.prompt === reportPrompt('final branch audit', ['F-1']))).toHaveLength(1)
   })
 
   it('records only the report the final gate dispatch produced', async () => {
@@ -886,7 +919,7 @@ describe('report contract and malformed-report recovery', () => {
       '"status" is exactly "clean" or "findings"',
       '"findings" is an array of finding objects',
       'exactly these six fields',
-      '"id": a unique, non-empty string within this report',
+      '"id": a unique, non-empty string that is not already used in this run',
       '"severity": exactly one of "critical", "high", "medium", "low", "info"',
       '"file": the non-empty path',
       '"line": the non-negative integer line number',
@@ -899,6 +932,127 @@ describe('report contract and malformed-report recovery', () => {
       expect(review.prompt).toContain(required)
       expect(audit.prompt).toContain(required)
     }
+  })
+
+  it('states the run\'s already-used finding ids to a dispatched review and audit', async () => {
+    const ports = fakePorts()
+    const svc = new OrcService(ports)
+    const { lead } = await toReview(ports, svc)
+    // One review raises two blocking findings; the run records both ids.
+    ports.reports.push(findingsReport(['F-1', 'F-2']))
+    await svc.dispatch(ports.supervisor, 'review', 'review task-1', signal)
+    await svc.fix(lead, 'F-1')
+    await svc.fix(lead, 'F-2')
+
+    // The next review and audit are both told which ids the run has used.
+    ports.reports.push(cleanReport, cleanReport)
+    await svc.dispatch(ports.supervisor, 'review', 'review task-1 again', signal)
+    await svc.dispatch(ports.supervisor, 'audit', 'audit task-1', signal)
+
+    const review = ports.clis.runs.find(run => run.prompt.startsWith('review task-1 again'))!
+    const audit = ports.clis.runs.find(run => run.prompt.startsWith('audit task-1'))!
+    for (const prompt of [review.prompt, audit.prompt]) {
+      expect(prompt).toContain('## Already-used finding ids in this run')
+      expect(prompt).toContain('The run has already recorded these finding ids: F-1, F-2.')
+      expect(prompt).toContain('Every finding in your report must use an id that is not in that list.')
+    }
+  })
+
+  it('caps the stated ids and says the list is truncated', async () => {
+    const ports = fakePorts()
+    const svc = new OrcService(ports)
+    await toReview(ports, svc)
+    const ids = Array.from({ length: 25 }, (_, index) => `F-${index + 1}`)
+    // Low findings do not block, so the run advances to the audit, whose own
+    // contract must state the 25 ids the run has recorded.
+    ports.reports.push(findingsReport(ids, 'low'), cleanReport)
+    await svc.dispatch(ports.supervisor, 'review', 'review task-1', signal)
+    await svc.dispatch(ports.supervisor, 'audit', 'audit task-1', signal)
+
+    const audit = ports.clis.runs.find(run => run.prompt.startsWith('audit task-1'))!
+    const shown = ids.slice(0, MAX_STATED_FINDING_IDS)
+    expect(audit.prompt).toContain(
+      `The run has already recorded these finding ids: ${shown.join(', ')} (truncated: ${ids.length - shown.length} further recorded id(s) are not shown).`,
+    )
+    expect(audit.prompt).toContain('choose an id that has not been used anywhere in this run')
+  })
+
+  it('says no finding ids are used when the run has recorded none', async () => {
+    const ports = fakePorts()
+    const svc = new OrcService(ports)
+    await toReview(ports, svc)
+    ports.reports.push(cleanReport)
+    await svc.dispatch(ports.supervisor, 'review', 'review task-1', signal)
+
+    const review = ports.clis.runs.find(run => run.prompt.startsWith('review task-1'))!
+    expect(review.prompt).toContain('## Already-used finding ids in this run')
+    expect(review.prompt).toContain(
+      'No finding ids have been recorded in this run yet, so any non-empty id you choose is free.',
+    )
+    expect(review.prompt).not.toContain('The run has already recorded these finding ids')
+  })
+
+  it('still rejects a report that reuses a recorded finding id', async () => {
+    const ports = fakePorts()
+    const svc = new OrcService(ports)
+    const { lead } = await toReview(ports, svc)
+    ports.reports.push(mediumReport)
+    await svc.dispatch(ports.supervisor, 'review', 'review task-1', signal)
+    expect(svc.state(ports.supervisor).phase).toBe('fix')
+    await svc.fix(lead, 'F-1')
+
+    // The contract states F-1 is taken, but a report that re-reports it is still
+    // refused by the unchanged run-level rule.
+    ports.reports.push(mediumReport)
+    await expect(svc.dispatch(ports.supervisor, 'review', 'review task-1 again', signal))
+      .rejects.toThrow(/duplicate finding id F-1; finding ids are unique within a run/)
+    expect(svc.state(ports.supervisor).phase).toBe('review')
+    expect(eventNames(ports).filter(name => name === 'orc/review-result')).toHaveLength(1)
+    expect(svc.state(ports.supervisor).findings.map(finding => finding.id)).toEqual(['F-1'])
+  })
+
+  it('accepts a fresh finding id after a fix and advances the run', async () => {
+    const ports = fakePorts()
+    const svc = new OrcService(ports)
+    const { lead } = await toReview(ports, svc)
+    ports.reports.push(mediumReport)
+    await svc.dispatch(ports.supervisor, 'review', 'review task-1', signal)
+    await svc.fix(lead, 'F-1')
+    ports.reports.push(cleanReport, cleanReport)
+    await svc.dispatch(ports.supervisor, 'review', 'review task-1 after fix', signal)
+    await svc.dispatch(ports.supervisor, 'audit', 'audit task-1 after fix', signal)
+    expect(svc.state(ports.supervisor).taskGate).toBe('passed')
+
+    // The final review answers the way the live run's did: it picks the obvious
+    // F-1 again, and the run-level rule refuses it.
+    ports.reports.push(mediumReport)
+    await expect(svc.finalBranchReview(ports.supervisor, 'final branch review', signal))
+      .rejects.toThrow(/duplicate finding id F-1; finding ids are unique within a run/)
+    expect(svc.state(ports.supervisor).phase).toBe('final-review')
+
+    // The contract the run handed that backend states which ids are taken, so a
+    // retry derives a free one from it — the exact step the live run could not
+    // take. With the pre-fix contract the list is absent, so this picks F-1
+    // again and the run cannot advance.
+    const prompt = ports.clis.runs.find(run => run.prompt.startsWith('final branch review'))!.prompt
+    const fresh = freshFindingId(usedIdsFromContract(prompt))
+    ports.reports.push(findingsReport([fresh]))
+    const blocked = await svc.finalBranchReview(ports.supervisor, 'final branch review', signal)
+    expect(blocked.findings.map(finding => finding.id)).toEqual(['F-1', fresh])
+    expect(blocked.finalReview).toBe('blocked')
+    expect(blocked.phase).toBe('fix')
+
+    // The fix cycle for the fresh finding re-runs the task gates, and the second
+    // final review — now told both ids — is clean, so the run completes.
+    await svc.fix(lead, fresh)
+    ports.reports.push(cleanReport, cleanReport, cleanReport, cleanReport)
+    await svc.dispatch(ports.supervisor, 'review', 'review task-1 again', signal)
+    await svc.dispatch(ports.supervisor, 'audit', 'audit task-1 again', signal)
+    await svc.finalBranchReview(ports.supervisor, 'final branch review again', signal)
+    await svc.finalBranchAudit(ports.supervisor, 'final branch audit', signal)
+    await expect(svc.complete(ports.supervisor)).resolves.toMatchObject({ phase: 'completed' })
+    const secondFinal = ports.clis.runs.find(run => run.prompt.startsWith('final branch review again'))!
+    expect(secondFinal.prompt).toContain('The run has already recorded these finding ids: F-1, F-2.')
   })
 
   it('does not state the report contract to spec, plan, or code', async () => {
