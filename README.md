@@ -210,22 +210,33 @@ node scripts/benchmark.mjs \
   --command codex --arg exec --arg --json --arg -
 
 node scripts/benchmark.mjs \
-  --backend claude --model claude-opus-4-1 --effort high --version 2.1.280 \
-  --command-json '["claude","--print"]'
+  --backend claude --model claude-opus-4-1 --effort high --version 2.1.281 \
+  --command-json '["claude","--print","--output-format","json","--model","claude-opus-4-1","--effort","high"]'
 ```
 
 **Output formats the runner understands.** Before it looks for `FINDING:` lines,
 the runner reduces a spawned invocation's stdout to the assistant's accepted
-final text. Two shapes are understood:
+final text. Three shapes are understood:
 
+- **Claude Code `--output-format json`** — a single JSON object whose `type` is
+  `result`; the answer is its `result` string, JSON-decoded so the newlines it
+  escaped become real finding lines. This is the shape ORC itself dispatches to
+  Claude (`--output-format json`; see `claudeArgv` in `src/host/cli.ts`), and the
+  shape was confirmed against a real `claude` `2.1.281` invocation. An
+  `is_error: true`, a `subtype` other than `success`, or a `result` that is
+  missing or not a string fails that fixture's run; an empty `result` is a real
+  "reported nothing" answer and scores zero without failing.
 - **Codex `--json` JSONL** — one event object per stdout line. The answer is the
   `text` of the `item.completed` event whose item type is `agent_message`, with
   the newlines JSON escaped decoded; every non-assistant event is ignored. A
   `turn.failed` or top-level `error` event fails that fixture's run.
 - **Plain text** — the whole stdout is the answer. This is what `claude --print`
-  emits at its default `--output-format text` (per `claude --help`; the CLI was
-  not invoked against a model to confirm, only its documented default was read),
-  and what `codex exec` emits without `--json`.
+  emits at `--output-format text`, and what `codex exec` emits without `--json`.
+
+A stdout that opens a JSON object is an envelope attempt, never plain text:
+malformed JSON, or a JSON object that matches none of the shapes above, **fails
+the run**, naming the fixture and the supported formats. It is never read as
+plain text and silently scored as zero findings.
 
 An invocation that exits 0 but yields **no extractable assistant text fails the
 run** and writes no record; it is never scored as a zero-finding (clean) result.

@@ -34,8 +34,25 @@
  *   `agent_message`; JSON decoding restores the newlines it escaped. Non-
  *   assistant events are ignored, and a `turn.failed` or top-level `error`
  *   event — the two the Codex schema calls fatal — fails that fixture's run.
+ * - Claude Code `--output-format json` — the shape ORC itself dispatches
+ *   (`claudeArgv` in `src/host/cli.ts`) — writes exactly one JSON object whose
+ *   `type` is `result`. The answer is its `result` string, JSON-decoded so the
+ *   newlines it escaped become real finding lines. An `is_error: true`, a
+ *   `subtype` other than `success`, or a `result` that is missing or not a
+ *   string is an unusable envelope and fails that fixture's run; a `result`
+ *   that is the empty string is a real "reported nothing" answer and scores
+ *   zero without failing.
  * - Anything else is plain text, and the whole stdout is the answer. That
- *   covers `claude --print` and `codex exec` without `--json`.
+ *   covers `claude --print --output-format text` and `codex exec` without
+ *   `--json`.
+ *
+ * A stdout whose first non-whitespace byte opens a JSON object is an envelope
+ * attempt, never plain text: malformed JSON, or a JSON object that matches no
+ * supported shape, fails the run loudly — naming the fixture and the supported
+ * formats — instead of silently scoring zero findings. That closes the hole a
+ * non-Codex JSON envelope used to fall through: its escaped `FINDING:` lines
+ * sat inside one JSON string, so no stdout line matched and the fixture scored
+ * a silent zero.
  *
  * An invocation that exits 0 but yields no extractable assistant text fails the
  * run and writes no record; it is never scored as a zero-finding (clean) run.
@@ -114,6 +131,22 @@ const CODEX_FAILURE_EVENTS = new Set(['turn.failed', 'error'])
 /** The item type whose `text` is the assistant's accepted final message. */
 const CODEX_AGENT_MESSAGE = 'agent_message'
 
+/**
+ * The Claude Code `--output-format json` envelope
+ * (https://code.claude.com/docs/en/headless).
+ *
+ * The CLI writes exactly one JSON object whose `type` is `result`; `result`
+ * carries the assistant's final text with its newlines escaped inside the JSON
+ * string, `subtype` reports completion status, and `is_error` reports failure.
+ * The only success pair is `subtype: "success"` with `is_error: false`.
+ */
+const CLAUDE_RESULT_TYPE = 'result'
+const CLAUDE_SUCCESS_SUBTYPE = 'success'
+
+/** The output shapes a live invocation may legitimately write, for diagnostics. */
+const EXPECTED_SHAPES = 'a Claude --output-format json result envelope carrying a string "result", '
+  + `Codex --json JSONL carrying an item.completed ${CODEX_AGENT_MESSAGE} event, or plain text on stdout`
+
 /** How much redacted provider output a failure diagnostic may carry. */
 const EXCERPT_LIMIT = 200
 
@@ -185,29 +218,73 @@ function codexStreamOf(lines) {
  * clean fixture and scores zero findings. `ok: false` means the invocation
  * produced no answer at all, which must fail the run rather than be normalised
  * into a clean zero-finding score.
+ *
+ * Three shapes are understood, tried in this order: Codex `--json` JSONL, the
+ * Claude Code `--output-format json` envelope, and plain text. A stdout whose
+ * first non-whitespace byte opens a JSON object is never plain text: it must
+ * decode and match the Claude envelope, so an unrecognised JSON object fails
+ * loudly instead of scoring zero.
  */
 function extractAssistantText(stdout) {
   const source = typeof stdout === 'string' ? stdout : ''
   if (source.trim() === '') return { ok: false, reason: 'it wrote nothing to stdout' }
   const lines = source.split('\n').map(line => line.trim()).filter(line => line.length > 0)
   const stream = codexStreamOf(lines)
-  // Not Codex JSONL: the whole stdout is the assistant text (`claude --print`,
-  // and `codex exec` without `--json`).
-  if (stream === undefined) return { ok: true, text: source }
-  if (stream.unreadable > 0) {
-    return { ok: false, reason: `its Codex JSONL stream carried ${stream.unreadable} unreadable line(s)` }
+  if (stream !== undefined) {
+    if (stream.unreadable > 0) {
+      return { ok: false, reason: `its Codex JSONL stream carried ${stream.unreadable} unreadable line(s)` }
+    }
+    const failure = stream.events.find(event => CODEX_FAILURE_EVENTS.has(event.type))
+    if (failure !== undefined) {
+      return { ok: false, reason: `the turn failed with a Codex "${failure.type}" event` }
+    }
+    const messages = stream.events
+      .filter(event => event.type === 'item.completed' && event.item?.type === CODEX_AGENT_MESSAGE && typeof event.item.text === 'string')
+      .map(event => event.item.text)
+    if (messages.length === 0) {
+      return { ok: false, reason: `its Codex JSONL stream carried no item.completed ${CODEX_AGENT_MESSAGE} event` }
+    }
+    return { ok: true, text: messages.join('\n') }
   }
-  const failure = stream.events.find(event => CODEX_FAILURE_EVENTS.has(event.type))
-  if (failure !== undefined) {
-    return { ok: false, reason: `the turn failed with a Codex "${failure.type}" event` }
+  // Not Codex JSONL. Claude's `--output-format json` writes exactly one JSON
+  // object, so a stdout that opens an object is an envelope attempt and must
+  // match that shape. Treating it as plain text is the defect this guards: the
+  // answer rides inside one JSON string with escaped newlines, so no line
+  // starts with `FINDING:` and the fixture would score a silent zero.
+  const trimmed = source.trim()
+  if (trimmed.startsWith('{')) {
+    let envelope
+    try {
+      envelope = JSON.parse(trimmed)
+    } catch {
+      return { ok: false, reason: 'its JSON envelope is malformed JSON' }
+    }
+    if (envelope === null || typeof envelope !== 'object' || Array.isArray(envelope)) {
+      return { ok: false, reason: 'its JSON output is not an object' }
+    }
+    if (envelope.type !== CLAUDE_RESULT_TYPE) {
+      const type = typeof envelope.type === 'string' ? `"${safeExcerpt(envelope.type)}"` : 'absent'
+      return { ok: false, reason: `it wrote a JSON object that matches no supported shape (its "type" is ${type})` }
+    }
+    // A `type: "result"` object is the Claude envelope. Anything unusable in it
+    // is a broken run, never a zero-finding score.
+    if (envelope.is_error === true) {
+      return { ok: false, reason: 'its Claude result envelope reported is_error' }
+    }
+    if (typeof envelope.result !== 'string') {
+      return { ok: false, reason: 'its Claude result envelope carried no usable string "result" field' }
+    }
+    if (envelope.subtype !== CLAUDE_SUCCESS_SUBTYPE) {
+      const subtype = typeof envelope.subtype === 'string' ? `"${safeExcerpt(envelope.subtype)}"` : 'absent'
+      return { ok: false, reason: `its Claude result envelope did not report a successful completion (subtype ${subtype})` }
+    }
+    // A `result` that decoded to the empty string is a real answer that reported
+    // nothing, which is exactly the clean-fixture reading and scores zero.
+    return { ok: true, text: envelope.result }
   }
-  const messages = stream.events
-    .filter(event => event.type === 'item.completed' && event.item?.type === CODEX_AGENT_MESSAGE && typeof event.item.text === 'string')
-    .map(event => event.item.text)
-  if (messages.length === 0) {
-    return { ok: false, reason: `its Codex JSONL stream carried no item.completed ${CODEX_AGENT_MESSAGE} event` }
-  }
-  return { ok: true, text: messages.join('\n') }
+  // Plain text: the whole stdout is the assistant text (`claude --print
+  // --output-format text`, and `codex exec` without `--json`).
+  return { ok: true, text: source }
 }
 
 function fail(message) {
@@ -444,8 +521,7 @@ async function collect(fixtures, args, argv) {
       // normalise unparseable output into a zero-finding (clean) result.
       throw new Error(
         `fixture "${fixture.id}" produced no extractable assistant text: ${extracted.reason}. `
-        + 'Expected Codex --json JSONL carrying an item.completed agent_message event, or plain text on stdout '
-        + '(the whole output is the answer for claude --print and for codex exec without --json). '
+        + `Expected one of the supported output shapes: ${EXPECTED_SHAPES}. `
         + `Diagnostic: ${safeExcerpt(stdout) || '<no stdout>'}`,
       )
     }

@@ -14,11 +14,14 @@
  *   stdin, and refuses to write a record whose `backendVersion` would be empty
  *   (R22: an empty live version can never be admissible evidence);
  * - before the finding regex runs, the runner reduces the selected CLI's real
- *   output to the assistant's accepted final text: the `item.completed`
- *   `agent_message` text of a Codex `--json` JSONL stream, or the whole stdout
- *   when the output is plain text (`claude --print`, `codex exec` without
- *   `--json`). An invocation that exits 0 but yields no extractable text fails
- *   the run; an extracted-but-empty report still scores zero findings;
+ *   output to the assistant's accepted final text in one of three shapes: the
+ *   `result` string of a Claude `--output-format json` envelope (the shape ORC
+ *   dispatches), the `item.completed` `agent_message` text of a Codex `--json`
+ *   JSONL stream, or the whole stdout when the output is plain text
+ *   (`claude --print --output-format text`, `codex exec` without `--json`). An
+ *   invocation that exits 0 but yields no extractable text fails the run; an
+ *   extracted-but-empty report still scores zero findings; and any other JSON
+ *   object fails loudly instead of scoring a silent zero;
  * - the prompt it sends names that fixture's candidate finding ids as the only
  *   reportable vocabulary and never marks which are present — the candidates
  *   mix the seeded ids with plausible distractors, and a clean fixture offers a
@@ -34,7 +37,7 @@ import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterAll, describe, expect, it } from 'vitest'
 import { EVIDENCE_DIR, loadBenchmarks } from '../src/host/index.js'
-import { evidenceFilename } from '../scripts/benchmark.mjs'
+import { evidenceFilename, extractAssistantText, findingsOf } from '../scripts/benchmark.mjs'
 
 /** The repository root, so the runner and its fixtures resolve. */
 const ROOT = fileURLToPath(new URL('..', import.meta.url))
@@ -50,6 +53,8 @@ const ECHO_CANDIDATES = join(ROOT, 'tests', 'fixtures', 'benchmark-echo-candidat
 const CODEX_JSONL = join(ROOT, 'tests', 'fixtures', 'benchmark-codex-jsonl.mjs')
 /** The fake plain-text CLI, the shape `claude --print` and `codex exec` emit. */
 const PLAIN_TEXT = join(ROOT, 'tests', 'fixtures', 'benchmark-plain-text.mjs')
+/** The fake `claude --print --output-format json` CLI, whose answer rides inside the result envelope. */
+const CLAUDE_JSON = join(ROOT, 'tests', 'fixtures', 'benchmark-claude-json.mjs')
 
 /** One seeded or clean fixture as `benchmarks/fixtures.json` ships it. */
 interface Fixture {
@@ -477,6 +482,97 @@ describe('benchmark runner output extraction', () => {
       expect(scored.reported).toEqual(EXPECTED)
       expect(scored.detected).toEqual(fixture?.expected)
     }
+  })
+
+  it('extracts findings from a Claude --output-format json result envelope', () => {
+    // The gap this fix closes: ORC dispatches Claude Code with
+    // `--output-format json` (`claudeArgv` in `src/host/cli.ts`), whose single
+    // JSON object carries the answer as a `result` string with escaped
+    // newlines. A runner that fell through to the plain-text path saw no
+    // `FINDING:` line and scored a silent zero; the envelope must be decoded
+    // first. All four seeded ids are sent to every fixture, so detection
+    // reaches 1.0 only if `result` was decoded into separate finding lines.
+    const result = run(...ROUTE, '--command', process.execPath, '--arg', CLAUDE_JSON, ...EXPECTED.flatMap(id => ['--arg', id]))
+    expect(result.status).toBe(0)
+    expect(result.record).toMatchObject({ detectionScore: 1 })
+
+    const perFixture = result.record?.perFixture as ScoredFixture[]
+    for (const scored of perFixture) {
+      const fixture = FIXTURES.find(entry => entry.id === scored.id)
+      expect(scored.reported).toEqual(EXPECTED)
+      expect(scored.detected).toEqual(fixture?.expected)
+    }
+  })
+
+  it('decodes the escaped newlines of the real Claude envelope before the finding regex runs', () => {
+    // The verbatim real shape `claude --print --output-format json` writes
+    // (captured from `claude` 2.1.281): one JSON object whose `result` is the
+    // only place the answer appears. Its escaped newlines must decode before
+    // `findingsOf` splits lines, or the report is one unmatchable blob.
+    const envelope = JSON.stringify({
+      duration_api_ms: 1860,
+      session_id: 'b1a76566-96fe-41a9-b8b3-d9468ce2a13a',
+      is_error: false,
+      num_turns: 1,
+      subtype: 'success',
+      result: 'FINDING: rounding-overpays\nFINDING: duplicate-credit',
+      type: 'result',
+    })
+    const extracted = extractAssistantText(envelope)
+    expect(extracted).toEqual({ ok: true, text: 'FINDING: rounding-overpays\nFINDING: duplicate-credit' })
+    expect(findingsOf(extracted.ok ? extracted.text : '')).toEqual(['rounding-overpays', 'duplicate-credit'])
+  })
+
+  it('scores a Claude envelope whose result is empty as zero findings without failing', () => {
+    // An empty `result` is a real answer that reported nothing — the expected
+    // reading for a clean fixture — so it scores zero and writes a record. It
+    // is deliberately not the unparseable-envelope failure.
+    const result = run(...ROUTE, '--command', process.execPath, '--arg', CLAUDE_JSON, '--arg', '--empty-result')
+    expect(result.status).toBe(0)
+    expect(result.record).toMatchObject({ detectionScore: 0, falsePositiveScore: 0 })
+
+    const perFixture = result.record?.perFixture as ScoredFixture[]
+    for (const scored of perFixture) expect(scored.reported).toEqual([])
+  })
+
+  it('fails a Claude envelope that carries an error or no usable result', () => {
+    // Every unusable envelope is a broken run, never a silent zero: an
+    // `is_error`, a missing or non-string `result`, and any subtype that is not
+    // `success` (including an absent one) all fail loudly.
+    const cases: [string, RegExp][] = [
+      ['--is-error', /reported is_error/],
+      ['--no-result', /carried no usable string "result" field/],
+      ['--non-string-result', /carried no usable string "result" field/],
+      ['--non-success-subtype', /did not report a successful completion \(subtype "error_max_turns"\)/],
+      ['--no-subtype', /did not report a successful completion \(subtype absent\)/],
+    ]
+    for (const [mode, pattern] of cases) {
+      const result = run(...ROUTE, '--command', process.execPath, '--arg', CLAUDE_JSON, '--arg', mode)
+      expect(result.status).toBe(1)
+      expect(result.record).toBeUndefined()
+      expect(result.stderr).toContain('fixture "fin-round-up" produced no extractable assistant text')
+      expect(result.stderr).toMatch(pattern)
+    }
+  })
+
+  it('fails a JSON object that matches no supported shape instead of scoring zero', () => {
+    // The other half of the gap: an unrecognised JSON object used to become
+    // "plain text", yield no finding lines, and score a silent zero. It must
+    // fail loudly, naming the fixture and every supported format.
+    const unknown = run(...ROUTE, '--command', process.execPath, '--arg', CLAUDE_JSON, '--arg', '--unknown-json')
+    expect(unknown.status).toBe(1)
+    expect(unknown.record).toBeUndefined()
+    expect(unknown.stderr).toContain('fixture "fin-round-up" produced no extractable assistant text')
+    expect(unknown.stderr).toContain('matches no supported shape')
+    expect(unknown.stderr).toContain('a Claude --output-format json result envelope carrying a string "result"')
+    expect(unknown.stderr).toContain('Codex --json JSONL carrying an item.completed agent_message event, or plain text on stdout')
+
+    // A recognisably-Claude envelope that is not valid JSON is malformed, not
+    // plain text whose visible `result` text might be scored.
+    const malformed = run(...ROUTE, '--command', process.execPath, '--arg', CLAUDE_JSON, '--arg', '--malformed')
+    expect(malformed.status).toBe(1)
+    expect(malformed.record).toBeUndefined()
+    expect(malformed.stderr).toContain('its JSON envelope is malformed JSON')
   })
 
   it('fails a run whose exit-0 output carries no extractable assistant text', () => {
