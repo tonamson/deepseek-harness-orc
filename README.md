@@ -22,6 +22,12 @@ Only the CLI you actually select is required. Newer CLI versions have no fixed
 upper bound, but ORC re-runs its version, authentication, and capability probe
 before dispatch and refuses a version that fails it.
 
+A version minimum is not admissible evidence. High-risk review and audit accept a
+route only when its live version is *exactly equal* to the version a benchmark
+record measured, so Claude Code `2.1.280` and any Codex newer than `0.156.1`
+lose the high-risk route until you measure that version — see
+[Benchmark evidence](#benchmark-evidence).
+
 ## Install
 
 Install the one bundle package into a Web profile:
@@ -112,12 +118,17 @@ namespace. It configures:
   health/authentication result;
 - Auto-routing limits and an optional cost ceiling.
 
-Auto routing uses live provider/CLI catalogs, recorded official capability
-claims, and versioned ORC benchmark evidence. It never browses for claims on
-each task, and it records the exact evidence behind every decision. A newly
-available model is not eligible for high-risk review or audit until the required
-benchmark evidence exists. If no allowed route meets the stage's quality floor,
-the stage stops and asks you to configure another route.
+Auto routing uses live provider/CLI catalogs and versioned ORC benchmark
+evidence, and it records the exact catalog snapshot and benchmark record behind
+every decision. **Recorded official capability and pricing claims are not
+implemented**: every catalog entry carries an empty `sourceUrl`, and
+`retrievedAt` is the moment ORC observed the route live, not the moment a source
+was retrieved. The only capability evidence ORC uses is a route's own live probe
+(version, authentication, and a harmless capability run), and the only cost it
+uses is a benchmark record's measured cost. A newly available model is not
+eligible for high-risk review or audit until the required benchmark evidence
+exists. If no allowed route meets the stage's quality floor, the stage stops and
+asks you to configure another route.
 
 ### Provider connection test
 
@@ -173,24 +184,39 @@ number says nothing about how a route names, ranks, or explains issues on real
 code, and nothing about whether it can surface a real bug the suite did not
 seed. Read it as a floor on discrimination, not as a quality ranking.
 
-**The bundle ships one measured record.** `benchmarks/evidence/` carries
-`codex:gpt-6-sol:high:2026-09-24T02:44:02.851Z.json`, so a fresh install can
-route high-risk review and audit without a first-run measurement. It records the
-exact route it measured — backend `codex`, model `gpt-6-sol`, effort `high` —
-the backend version `0.156.1`, the date, the suite revision `orc-review-v1`, the
-scopes it covers (`financial` and `security`), and the measured scores
-(detection `1.0`, false-positive `0.2`), alongside latency and cost.
+**The bundle ships two measured records**, and it is the pair that makes the
+high-risk path complete. `benchmarks/evidence/` carries
+`codex_gpt-6-sol_high_2026-09-24T02_44_02.851Z.json` (backend `codex`, model
+`gpt-6-sol`, effort `high`, backend version `0.156.1`, detection `1.0`,
+false-positive `0.2`) and
+`claude_claude-sonnet-5_high_2026-09-24T03_09_19.373Z.json` (backend `claude`,
+model `claude-sonnet-5`, effort `high`, backend version `2.1.281`, detection
+`1.0`, false-positive `0.0`). Each also records its date, the suite revision
+`orc-review-v1`, the scopes it covers (`financial` and `security`), and its
+measured latency and cost.
 
-That score is a measurement, not a promise. It was taken on one specific
-machine, account, and CLI build (`codex` `0.156.1`) against this suite revision.
-A different version, account, or provider deployment can behave differently, so
-the record is evidence that this exact route cleared the floors — not a general
-quality guarantee about the model, and not a claim about any other route. It is
-only admissible while its backend version equals the live catalog's observation
-and its date is within `catalogMaxAgeDays`; when either moves, the route fails
-closed until it is re-measured. A bundle with no evidence directory at all still
-yields the fail-closed empty snapshot, which refuses high-risk review and audit
-with `no-qualifying-route` rather than admitting an unmeasured route.
+Two records ship because **a high-risk review and its paired audit must run on
+different backends**: the audit must be independent of the review. With only one
+evidence-qualified backend the audit is refused with `no-independent-route`, so
+the pair is what lets a fresh install run the full money/security gate.
+
+Admissibility requires **exact version equality**: a record matches a route only
+when its `backendVersion` equals the live catalog's observation for that exact
+backend, model, and effort, its date is inside `catalogMaxAgeDays`, and its scope
+covers the required risk areas. The documented CLI minimums are therefore not
+evidence. Claude Code `2.1.280` — the minimum this bundle supports — and any
+Codex newer than `0.156.1` do not match the shipped records, so those routes are
+excluded from high-risk review and audit until you measure them with the runner
+below. That is the fail-closed behavior, not a defect: an unmeasured version may
+behave differently.
+
+Each score is a measurement, not a promise. It was taken on one specific machine,
+account, and CLI build against this suite revision, so a record is evidence that
+this exact route cleared the floors — not a general quality guarantee about the
+model, and not a claim about any other route. A bundle with no evidence directory
+at all still yields the fail-closed empty snapshot, which refuses high-risk
+review and audit with `no-qualifying-route` rather than admitting an unmeasured
+route.
 
 Generate one additional versioned record per route you want high-risk review and
 audit routed to. From a recorded run:
