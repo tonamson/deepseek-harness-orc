@@ -1,6 +1,3 @@
 node_modules/
 lib/
 .npm-cache/
-# Locally generated benchmark evidence. The directory is created on demand by
-# `scripts/benchmark.mjs`; a user's own scored run must not dirty the tree.
-benchmarks/evidence/

@@ -171,16 +171,27 @@ number says nothing about how a route names, ranks, or explains issues on real
 code, and nothing about whether it can surface a real bug the suite did not
 seed. Read it as a floor on discrimination, not as a quality ranking.
 
-**A fresh install ships no evidence records.** `benchmarks/evidence/` does not
-exist until you generate a record, so the fail-closed evidence snapshot excludes
-every high-risk review and audit: Auto routing refuses those stages with
-`no-qualifying-route`, and the run stops and asks you to configure another route
-or generate evidence. ORC does not ship a record because a benchmark score is
-only meaningful when it measures a real run of the route you selected; an
-invented score would be worse than none.
+**The bundle ships one measured record.** `benchmarks/evidence/` carries
+`codex:gpt-6-sol:high:2026-09-24T02:44:02.851Z.json`, so a fresh install can
+route high-risk review and audit without a first-run measurement. It records the
+exact route it measured — backend `codex`, model `gpt-6-sol`, effort `high` —
+the backend version `0.156.1`, the date, the suite revision `orc-review-v1`, the
+scopes it covers (`financial` and `security`), and the measured scores
+(detection `1.0`, false-positive `0.2`), alongside latency and cost.
 
-Generate one versioned record per route you want high-risk review and audit
-routed to. From a recorded run:
+That score is a measurement, not a promise. It was taken on one specific
+machine, account, and CLI build (`codex` `0.156.1`) against this suite revision.
+A different version, account, or provider deployment can behave differently, so
+the record is evidence that this exact route cleared the floors — not a general
+quality guarantee about the model, and not a claim about any other route. It is
+only admissible while its backend version equals the live catalog's observation
+and its date is within `catalogMaxAgeDays`; when either moves, the route fails
+closed until it is re-measured. A bundle with no evidence directory at all still
+yields the fail-closed empty snapshot, which refuses high-risk review and audit
+with `no-qualifying-route` rather than admitting an unmeasured route.
+
+Generate one additional versioned record per route you want high-risk review and
+audit routed to. From a recorded run:
 
 ```sh
 node scripts/benchmark.mjs \
@@ -227,8 +238,9 @@ silently producing an inadmissible zero.
 `backendVersion` is empty can never be admissible, so the runner refuses to
 write one. The runner never guesses a route, never calls a model on its own, and
 never falls back to another backend. Records are written to
-`benchmarks/evidence/` (gitignored) and are read by the Host when the profile
-loads, so restart the profile after generating them.
+`benchmarks/evidence/` — the directory the bundle ships, alongside its own
+record — and are read by the Host when the profile loads, so restart the profile
+after generating them.
 
 ## Supported DSH versions
 

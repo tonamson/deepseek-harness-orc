@@ -1,0 +1,101 @@
+{
+  "id": "codex:gpt-6-sol:high:2026-09-24T02:44:02.851Z",
+  "suiteRevision": "orc-review-v1",
+  "backend": "codex",
+  "model": "gpt-6-sol",
+  "effort": "high",
+  "backendVersion": "0.156.1",
+  "date": "2026-09-24T02:44:02.851Z",
+  "scope": [
+    "financial",
+    "security"
+  ],
+  "detectionScore": 1,
+  "falsePositiveScore": 0.2,
+  "latencyMs": 102506,
+  "costUsd": 0,
+  "perFixture": [
+    {
+      "id": "fin-round-up",
+      "scope": "financial",
+      "expected": [
+        "rounding-overpays"
+      ],
+      "reported": [
+        "rounding-overpays"
+      ],
+      "detected": [
+        "rounding-overpays"
+      ],
+      "falsePositives": [],
+      "detection": 1
+    },
+    {
+      "id": "fin-double-settle",
+      "scope": "financial",
+      "expected": [
+        "duplicate-credit"
+      ],
+      "reported": [
+        "duplicate-credit"
+      ],
+      "detected": [
+        "duplicate-credit"
+      ],
+      "falsePositives": [],
+      "detection": 1
+    },
+    {
+      "id": "sec-auth-bypass",
+      "scope": "security",
+      "expected": [
+        "authorization-bypass"
+      ],
+      "reported": [
+        "authorization-bypass"
+      ],
+      "detected": [
+        "authorization-bypass"
+      ],
+      "falsePositives": [],
+      "detection": 1
+    },
+    {
+      "id": "sec-secret-log",
+      "scope": "security",
+      "expected": [
+        "secret-in-log"
+      ],
+      "reported": [
+        "secret-in-log"
+      ],
+      "detected": [
+        "secret-in-log"
+      ],
+      "falsePositives": [],
+      "detection": 1
+    },
+    {
+      "id": "clean-round",
+      "scope": "financial",
+      "expected": [],
+      "reported": [
+        "rounding-overpays"
+      ],
+      "detected": [],
+      "falsePositives": [
+        "rounding-overpays"
+      ],
+      "detection": null
+    },
+    {
+      "id": "clean-auth",
+      "scope": "security",
+      "expected": [],
+      "reported": [],
+      "detected": [],
+      "falsePositives": [],
+      "detection": null
+    }
+  ]
+}

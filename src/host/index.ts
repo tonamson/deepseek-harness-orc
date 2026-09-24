@@ -23,6 +23,7 @@
 
 import { readFileSync, readdirSync } from 'node:fs'
 import { createHash } from 'node:crypto'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Context } from '@deepseek-ai/cordis'
@@ -83,20 +84,28 @@ export const EVIDENCE_DIR = new URL('../../benchmarks/evidence/', import.meta.ur
  * directory yields an empty snapshot, which excludes every high-risk review and
  * audit instead of admitting an unmeasured route.
  *
+ * The entry name is joined onto the directory path rather than resolved as a
+ * URL: a record id carries colons (`codex:gpt-6-sol:high:<date>`), and a
+ * relative reference whose first segment contains a colon is parsed as an
+ * absolute URL with that scheme, which `fileURLToPath` then rejects. A filename
+ * must never be able to fail the load — only unreadable content does.
+ *
  * @param directory - the evidence directory to read; defaults to the one this
  *   package ships (`benchmarks/evidence/`), which the archive carries because
  *   `scripts/` and `benchmarks/` are both in the manifest's `files`.
  */
 export function loadBenchmarks(directory: URL = EVIDENCE_DIR): BenchmarkSnapshot {
   let files: string[]
+  let base: string
   try {
-    files = readdirSync(fileURLToPath(directory)).filter(file => file.endsWith('.json')).sort()
+    base = fileURLToPath(directory)
+    files = readdirSync(base).filter(file => file.endsWith('.json')).sort()
   } catch {
     return { id: 'orc-evidence:none', suiteRevision: BENCHMARK_SUITE_REVISION, records: [] }
   }
   const records: BenchmarkEvidence[] = []
   for (const file of files) {
-    const path = fileURLToPath(new URL(file, directory))
+    const path = join(base, file)
     let parsed: unknown
     try {
       parsed = JSON.parse(readFileSync(path, 'utf8'))

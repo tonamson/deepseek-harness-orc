@@ -34,6 +34,7 @@ import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterAll, describe, expect, it } from 'vitest'
 import { EVIDENCE_DIR, loadBenchmarks } from '../src/host/index.js'
+import { evidenceFilename } from '../scripts/benchmark.mjs'
 
 /** The repository root, so the runner and its fixtures resolve. */
 const ROOT = fileURLToPath(new URL('..', import.meta.url))
@@ -131,6 +132,25 @@ function capturedPrompts(): string[] {
     .map(line => JSON.parse(line) as string)
 }
 
+/** One well-formed evidence record, with any field overridable per test. */
+function record(id: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id,
+    suiteRevision: 'orc-review-v1',
+    backend: 'codex',
+    model: 'gpt-5.2-codex',
+    effort: 'high',
+    backendVersion: '0.156.1',
+    date: '2026-09-23T00:00:00Z',
+    scope: ['financial', 'security'],
+    detectionScore: 0.9,
+    falsePositiveScore: 0.1,
+    latencyMs: 1200,
+    costUsd: 0.5,
+    ...overrides,
+  }
+}
+
 describe('shipped benchmark evidence', () => {
   it('resolves the evidence directory the archive ships', () => {
     // `benchmarks/` is in the manifest's `files`, so the archive carries this
@@ -142,20 +162,7 @@ describe('shipped benchmark evidence', () => {
     const dir = scratch()
     expect(loadBenchmarks(new URL(`file://${dir}/`))).toMatchObject({ records: [] })
 
-    writeFileSync(join(dir, 'codex.json'), JSON.stringify({
-      id: 'codex:gpt-5.2-codex:high',
-      suiteRevision: 'orc-review-v1',
-      backend: 'codex',
-      model: 'gpt-5.2-codex',
-      effort: 'high',
-      backendVersion: '0.156.1',
-      date: '2026-09-23T00:00:00Z',
-      scope: ['financial', 'security'],
-      detectionScore: 0.9,
-      falsePositiveScore: 0.1,
-      latencyMs: 1200,
-      costUsd: 0.5,
-    }))
+    writeFileSync(join(dir, 'codex.json'), JSON.stringify(record('codex:gpt-5.2-codex:high')))
 
     const snapshot = loadBenchmarks(new URL(`file://${dir}/`))
     expect(snapshot.records).toHaveLength(1)
@@ -168,10 +175,87 @@ describe('shipped benchmark evidence', () => {
     expect(() => loadBenchmarks(new URL(`file://${dir}/`))).toThrow(/broken\.json is not readable JSON/)
   })
 
+  it('loads a record whose filename contains colons', () => {
+    // The defect this test closes: the runner names a file after the record id,
+    // and the id separates route fields with colons. A loader that resolved the
+    // entry with `new URL(file, directory)` parsed `codex:` as a URL scheme and
+    // threw ERR_INVALID_URL_SCHEME, so a real record crashed the load instead of
+    // being read. The name here is byte-for-byte the one on disk for the record
+    // the bundle ships.
+    const dir = scratch()
+    const name = 'codex:gpt-6-sol:high:2026-09-24T02:44:02.851Z.json'
+    const id = 'codex:gpt-6-sol:high:2026-09-24T02:44:02.851Z'
+    writeFileSync(join(dir, name), JSON.stringify(record(id, {
+      model: 'gpt-6-sol',
+      date: '2026-09-24T02:44:02.851Z',
+      detectionScore: 1,
+      falsePositiveScore: 0.2,
+    })))
+
+    const snapshot = loadBenchmarks(new URL(`file://${dir}/`))
+    expect(snapshot.records).toHaveLength(1)
+    expect(snapshot.records[0]).toMatchObject({
+      id: 'codex:gpt-6-sol:high:2026-09-24T02:44:02.851Z',
+      backend: 'codex',
+      model: 'gpt-6-sol',
+      effort: 'high',
+      backendVersion: '0.156.1',
+    })
+  })
+
+  it('reads the record the bundle actually ships', () => {
+    // The shipped directory is the one the archive carries and the Host loads
+    // from at profile start, so this is the real path, not a temp stand-in.
+    const snapshot = loadBenchmarks()
+    expect(snapshot.suiteRevision).toBe('orc-review-v1')
+    const shipped = snapshot.records.find(entry => entry.id === 'codex:gpt-6-sol:high:2026-09-24T02:44:02.851Z')
+    expect(shipped).toMatchObject({
+      backend: 'codex',
+      model: 'gpt-6-sol',
+      effort: 'high',
+      backendVersion: '0.156.1',
+      date: '2026-09-24T02:44:02.851Z',
+      detectionScore: 1,
+      falsePositiveScore: 0.2,
+    })
+  })
+
+  it('fails loudly on a malformed record and on a missing directory', () => {
+    // A record that is readable JSON but not a valid record is a hard error: a
+    // silently skipped record would weaken the evidence set without saying so.
+    const malformed = scratch()
+    writeFileSync(join(malformed, 'bad-shape.json'), JSON.stringify({ id: 'x', backend: 'codex' }))
+    expect(() => loadBenchmarks(new URL(`file://${malformed}/`))).toThrow(/bad-shape\.json is malformed/)
+
+    // A directory that does not exist is not a fault: the fail-closed snapshot
+    // excludes every high-risk review and audit rather than crashing the Host.
+    const absent = join(scratch(), 'absent')
+    expect(loadBenchmarks(new URL(`file://${absent}/`))).toMatchObject({ id: 'orc-evidence:none', records: [] })
+  })
+
   it('verifies the fixture manifest keylessly', () => {
     const result = run('--verify-fixtures')
     expect(result.stderr).toBe('')
     expect(result.stdout).toContain('verified 6 fixtures')
+  })
+})
+
+describe('benchmark evidence filenames', () => {
+  it('sanitizes a record id to a colon-free, portable filename', () => {
+    // Colons are illegal in a Windows filename, so the runner must not emit
+    // them. The id keeps its identity inside the JSON; only the name changes.
+    const name = evidenceFilename('codex:gpt-6-sol:high:2026-09-24T02:44:02.851Z')
+    expect(name).toBe('codex_gpt-6-sol_high_2026-09-24T02_44_02.851Z.json')
+    expect(name).not.toContain(':')
+    expect(name).toMatch(/^[A-Za-z0-9._-]+$/)
+  })
+
+  it('names a record so the loader reads it back', () => {
+    const dir = scratch()
+    const id = 'codex:gpt-6-sol:high:2026-09-24T02:44:02.851Z'
+    writeFileSync(join(dir, evidenceFilename(id)), JSON.stringify(record(id)))
+    const snapshot = loadBenchmarks(new URL(`file://${dir}/`))
+    expect(snapshot.records.map(entry => entry.id)).toEqual([id])
   })
 })
 

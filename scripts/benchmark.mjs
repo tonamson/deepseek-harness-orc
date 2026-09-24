@@ -490,6 +490,19 @@ function score(fixtures, responses) {
 }
 
 /**
+ * The portable filename one evidence record is written to.
+ *
+ * The record id separates route fields with colons, but `:` is not a legal
+ * filename character on Windows, so the name keeps only the portable set
+ * `[A-Za-z0-9._-]` and collapses every other run to `_`. The id inside the JSON
+ * stays authoritative; the filename is only a portable handle, and the Host
+ * joins it onto the evidence directory rather than URL-parsing it.
+ */
+function evidenceFilename(id) {
+  return `${String(id).replace(/[^a-zA-Z0-9._-]+/g, '_')}.json`
+}
+
+/**
  * True when this file is the process entry point rather than an imported
  * module, so the extraction and scoring helpers can be imported and checked
  * directly (see the fix report's real-output proof) without the CLI driver
@@ -565,10 +578,10 @@ if (invokedDirectly) {
     costUsd: numeric(args, 'cost-usd', 0),
     perFixture: result.perFixture,
   }
-  const out = args.out ?? join(ROOT, 'benchmarks', 'evidence', `${record.id.replace(/[^a-zA-Z0-9._:-]+/g, '_')}.json`)
+  const out = args.out ?? join(ROOT, 'benchmarks', 'evidence', evidenceFilename(record.id))
   await mkdir(dirname(out), { recursive: true })
   await writeFile(out, `${JSON.stringify(record, null, 2)}\n`)
   process.stdout.write(`benchmark: wrote evidence for ${record.backend}/${record.model}/${record.effort} to ${out}\n`)
 }
 
-export { extractAssistantText, findingsOf, safeExcerpt }
+export { evidenceFilename, extractAssistantText, findingsOf, safeExcerpt }
