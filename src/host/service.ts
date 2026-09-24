@@ -270,6 +270,89 @@ function safeReason(error: unknown): string {
 /** The string form of a branded session id. */
 const idOf = (id: SessionId): string => String(id)
 
+/**
+ * Locate the report object in one review or audit answer.
+ *
+ * Three shapes are tried, in order, and only the first that yields a JSON value
+ * is used:
+ *
+ * 1. the whole answer as exact JSON — the contract's own shape;
+ * 2. the content of a single fenced code block (```` ```json ```` or ```` ``` ````),
+ *    which is how a model marks up an object it was told not to fence;
+ * 3. the first balanced `{…}` object in the text, scanned with string literals
+ *    and escapes respected, which is how a model wraps the object in a sentence.
+ *
+ * `undefined` means nothing was located; the caller refuses the answer. The
+ * result is never trusted here — {@link parseReport} still validates it.
+ */
+function locateReport(text: string): unknown {
+  const exact = tryJson(text)
+  if (exact !== undefined) return exact
+  const fenced = singleFence(text)
+  if (fenced !== undefined) {
+    const parsed = tryJson(fenced)
+    if (parsed !== undefined) return parsed
+  }
+  return firstBalancedObject(text)
+}
+
+/** Parse one candidate string, or `undefined` when it is not JSON. */
+function tryJson(text: string): unknown {
+  try {
+    return JSON.parse(text)
+  } catch {
+    return undefined
+  }
+}
+
+/** The content of the answer's single fenced block, or `undefined` for zero or many. */
+function singleFence(text: string): string | undefined {
+  const fences = [...text.matchAll(/```(?:json)?[ \t]*\r?\n?([\s\S]*?)```/g)]
+  return fences.length === 1 ? fences[0]![1] ?? '' : undefined
+}
+
+/**
+ * The first balanced `{…}` object in the text that parses as JSON.
+ *
+ * The scan counts braces outside string literals only and honours backslash
+ * escapes inside them, so a `}` in a finding's evidence text cannot truncate
+ * the object. A balanced span that is not JSON is skipped — prose may contain
+ * its own braces — but once a span *is* JSON it is the located object: a report
+ * that then fails validation is refused, never replaced by a later object.
+ */
+function firstBalancedObject(text: string): unknown {
+  for (let start = text.indexOf('{'); start !== -1; start = text.indexOf('{', start + 1)) {
+    const end = balancedEnd(text, start)
+    if (end === -1) break
+    const parsed = tryJson(text.slice(start, end))
+    if (parsed !== undefined) return parsed
+  }
+  return undefined
+}
+
+/** The index just past the `}` closing the `{` at `start`, or `-1` when unbalanced. */
+function balancedEnd(text: string, start: number): number {
+  let depth = 0
+  let inString = false
+  let escaped = false
+  for (let index = start; index < text.length; index += 1) {
+    const char = text[index]!
+    if (inString) {
+      if (escaped) escaped = false
+      else if (char === '\\') escaped = true
+      else if (char === '"') inString = false
+      continue
+    }
+    if (char === '"') inString = true
+    else if (char === '{') depth += 1
+    else if (char === '}') {
+      depth -= 1
+      if (depth === 0) return index + 1
+    }
+  }
+  return -1
+}
+
 /** Distinct values, in first-seen order. */
 const unique = <T>(values: readonly T[]): T[] => [...new Set(values)]
 
@@ -1038,20 +1121,21 @@ export class OrcService {
   /**
    * Parse one review/audit stage's accepted text.
    *
-   * The text must be exactly the report JSON: a fenced, padded, or otherwise
-   * unparseable answer is a malformed report. Both the JSON read and the schema
-   * check are wrapped here, so a refusal is always an ORC-owned
-   * {@link ReportError} carrying a bounded, redacted excerpt instead of a raw
-   * `SyntaxError` quoting the model's whole answer.
+   * The contract asks for exactly the report JSON, but a real backend wraps it
+   * in prose or a fence a large fraction of the time, so ORC first *locates*
+   * the report object in the answer (see {@link locateReport}) and then applies
+   * the unchanged {@link parseReport}. Locating never relaxes validation: the
+   * object that is found is accepted only if every report rule holds, and an
+   * answer with no locatable object is refused outright.
+   *
+   * Both the read and the schema check are wrapped here, so a refusal is always
+   * an ORC-owned {@link ReportError} carrying a bounded, redacted excerpt
+   * instead of a raw `SyntaxError` quoting the model's whole answer.
    */
   private stageReport(stage: AnalysisStage, text: string): unknown {
     if (stage !== 'review' && stage !== 'audit') return undefined
-    let raw: unknown
-    try {
-      raw = JSON.parse(text)
-    } catch {
-      throw new ReportError(`the answer is not the report JSON: ${safeExcerpt(text)}`)
-    }
+    const raw = locateReport(text)
+    if (raw === undefined) throw new ReportError(`the answer is not the report JSON: ${safeExcerpt(text)}`)
     try {
       parseReport(raw, stage)
     } catch (error) {

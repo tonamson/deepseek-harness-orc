@@ -973,6 +973,116 @@ describe('report contract and malformed-report recovery', () => {
   })
 })
 
+describe('report location', () => {
+  /** A valid report a backend wraps in prose or a fence. */
+  const report = {
+    status: 'findings',
+    findings: [{
+      id: 'F-1',
+      severity: 'medium',
+      file: 'src/pay.ts',
+      line: 12,
+      evidence: 'double credit',
+      remediation: 'settle once',
+    }],
+  }
+  const json = JSON.stringify(report)
+
+  /**
+   * The wrappers a real backend has been observed to add around the contract
+   * answer. The contract still asks for exact JSON; ORC has to survive a model
+   * that says something first anyway.
+   */
+  const wrappers: [string, (body: string) => string][] = [
+    ['exact JSON', body => body],
+    ['a fenced json block', body => `\`\`\`json\n${body}\n\`\`\``],
+    ['a plain fenced block', body => `\`\`\`\n${body}\n\`\`\``],
+    ['prose before and after', body => `No staged change, file src/pay.ts not found in repo. ${body}\nThat is all.`],
+    ['prose carrying an earlier unrelated brace', body => `The map {a, b} is unrelated, but here it is: ${body}`],
+  ]
+
+  it.each(wrappers)('locates a report wrapped in %s', async (_name, wrap) => {
+    const ports = fakePorts()
+    const svc = new OrcService(ports)
+    await toReview(ports, svc)
+    ports.reports.push(rawAnswer(wrap(json)))
+
+    const state = await svc.dispatch(ports.supervisor, 'review', 'review task-1', signal)
+
+    expect(state.findings.map(finding => finding.id)).toEqual(['F-1'])
+    expect(eventNames(ports)).toContain('orc/review-result')
+    expect(eventNames(ports)).not.toContain('orc/report-rejected')
+  })
+
+  it.each(wrappers)('still rejects a report that fails validation in %s', async (_name, wrap) => {
+    const ports = fakePorts()
+    const svc = new OrcService(ports)
+    await toReview(ports, svc)
+    // A contradictory report: "findings" with an empty list. Locating it must
+    // not relax one validation rule.
+    ports.reports.push(rawAnswer(wrap(JSON.stringify({ status: 'findings', findings: [] }))))
+
+    const failure = await svc.dispatch(ports.supervisor, 'review', 'review task-1', signal)
+      .then(() => undefined, (error: unknown) => error)
+
+    expect((failure as Error).name).toBe('ReportError')
+    expect((failure as Error).message).toMatch(/^blocking: the report is malformed: /)
+    expect(ports.journal.events.at(-1)!.type).toBe('orc/report-rejected')
+    expect(eventNames(ports)).not.toContain('orc/review-result')
+    expect(svc.state(ports.supervisor).phase).toBe('review')
+  })
+
+  it('locates a report whose own strings contain braces and escapes', async () => {
+    const ports = fakePorts()
+    const svc = new OrcService(ports)
+    await toReview(ports, svc)
+    const tricky = {
+      status: 'findings',
+      findings: [{
+        id: 'F-1',
+        severity: 'low',
+        file: 'src/pay.ts',
+        line: 1,
+        evidence: 'the literal {"a": 1} and a stray } brace',
+        remediation: 'escape { and } in the text',
+      }],
+    }
+    // A naive greedy regex or a brace counter that ignores string literals
+    // cannot locate this object.
+    ports.reports.push(rawAnswer(`Findings follow.\n${JSON.stringify(tricky)}\n`))
+
+    const state = await svc.dispatch(ports.supervisor, 'review', 'review task-1', signal)
+
+    expect(state.findings.map(finding => finding.evidence)).toEqual(['the literal {"a": 1} and a stray } brace'])
+  })
+
+  it('does not hunt for a later object once the first one is located', async () => {
+    const ports = fakePorts()
+    const svc = new OrcService(ports)
+    await toReview(ports, svc)
+    // The first balanced object is not a valid report; the clean one after it
+    // must not be accepted in its place.
+    ports.reports.push(rawAnswer(`${JSON.stringify({ status: 'findings', findings: [] })} ${JSON.stringify(cleanReport)}`))
+
+    await expect(svc.dispatch(ports.supervisor, 'review', 'review task-1', signal))
+      .rejects.toThrow(/^blocking: the report is malformed: /)
+    expect(eventNames(ports)).not.toContain('orc/review-result')
+  })
+
+  it('rejects an answer with no locatable object, never accepting the payload', async () => {
+    const ports = fakePorts()
+    const svc = new OrcService(ports)
+    await toReview(ports, svc)
+    // An unbalanced brace is not an object; nothing may be extracted from it.
+    ports.reports.push(rawAnswer('the review found {"status":"clean","findings":[]'))
+
+    await expect(svc.dispatch(ports.supervisor, 'review', 'review task-1', signal))
+      .rejects.toThrow(/^blocking: the answer is not the report JSON: /)
+    expect(ports.journal.events.at(-1)!.type).toBe('orc/report-rejected')
+    expect(eventNames(ports)).not.toContain('orc/review-result')
+  })
+})
+
 describe('catalog reads', () => {
   it('merges provider and CLI catalogs for every allowlisted route', async () => {
     const config = parseConfig({
