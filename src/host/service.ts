@@ -328,6 +328,17 @@ const carriesReport = (stage: RequestStage): boolean =>
   stage === 'review' || stage === 'audit' || stage === 'final-review' || stage === 'final-audit'
 
 /**
+ * The mutable character-equivalent budget one locate pass spends from.
+ *
+ * One accumulator is shared by every stage of {@link locateReport} so the bound
+ * is a bound on the whole path: a fence-heavy answer cannot spend the budget on
+ * fences and then let the brace scan spend it again.
+ */
+interface ScanBudget {
+  charged: number
+}
+
+/**
  * Locate the report object in one review or audit answer.
  *
  * Three shapes are tried, in order, and only the first that yields a JSON value
@@ -343,15 +354,34 @@ const carriesReport = (stage: RequestStage): boolean =>
  *
  * `undefined` means nothing was located; the caller refuses the answer. The
  * result is never trusted here — {@link parseReport} still validates it.
+ *
+ * Everything after step 1 spends from one {@link ScanBudget}, so the two stages
+ * cannot each spend the budget in turn: the fence stage charges each body's
+ * length and its parse attempt, the brace scan charges each examined character
+ * and its parse attempt, and once {@link REPORT_SCAN_CHAR_BUDGET} is spent
+ * either stage stops and the answer is refused as "nothing locatable". Step 1 is
+ * a single `JSON.parse` of the answer and is deliberately not charged: an exact
+ * answer may legitimately be larger than the scan budget, and refusing it would
+ * break the contract's own shape.
  */
 function locateReport(text: string): unknown {
   const exact = tryJson(text)
   if (exact !== undefined) return exact
+  const budget: ScanBudget = { charged: 0 }
   for (const body of fenceBodies(text)) {
-    const parsed = tryJson(body)
+    // The regex had to scan the body to find its closing fence, so the body's
+    // length is examined-character work and is charged like the brace scan's.
+    budget.charged += body.length
+    // Stop the generator as soon as the budget cannot afford another attempt:
+    // yielding the remaining bodies would keep the regex scanning the whole
+    // answer for candidates that can never be tried. Falling through leaves the
+    // brace scan with a spent budget, so the answer is refused as "nothing
+    // locatable" exactly as it is when any other bound is reached.
+    if (!canAffordAttempt(budget)) break
+    const parsed = tryJsonCharged(body, budget)
     if (parsed !== undefined) return parsed
   }
-  return firstBalancedObject(text)
+  return firstBalancedObject(text, budget)
 }
 
 /** Parse one candidate string, or `undefined` when it is not JSON. */
@@ -363,19 +393,59 @@ function tryJson(text: string): unknown {
   }
 }
 
-/** The content of every fenced block in the answer, in the order they appear. */
-function fenceBodies(text: string): string[] {
-  return [...text.matchAll(/```(?:json)?[ \t]*\r?\n?([\s\S]*?)```/g)].map(match => match[1] ?? '')
+/**
+ * Whether `budget` can still afford one more `JSON.parse` attempt.
+ *
+ * Shared by both stages of {@link locateReport} so the "charge before the
+ * attempt" rule is written once: a stage that cannot afford an attempt stops
+ * instead of overshooting by one.
+ */
+const canAffordAttempt = (budget: ScanBudget): boolean =>
+  budget.charged + REPORT_PARSE_ATTEMPT_CHAR_COST <= REPORT_SCAN_CHAR_BUDGET
+
+/**
+ * {@link tryJson} for a candidate that must first be afforded by `budget`.
+ *
+ * The attempt is charged before it is made, so a budget already too small to
+ * afford one stops here rather than overshooting by a single attempt.
+ * `undefined` then means "not attempted", which every caller treats exactly like
+ * "did not parse": the answer is refused, never accepted from a truncated scan.
+ */
+function tryJsonCharged(text: string, budget: ScanBudget): unknown {
+  if (!canAffordAttempt(budget)) return undefined
+  budget.charged += REPORT_PARSE_ATTEMPT_CHAR_COST
+  return tryJson(text)
 }
 
 /**
- * The total work {@link firstBalancedObject} may spend before it gives up and
- * reports nothing locatable, counted in character-equivalents.
+ * The content of every fenced block in the answer, in the order they appear.
+ *
+ * A generator, so a caller that stops early — because the shared budget is
+ * spent — stops the regular expression with it: materializing every body first
+ * would scan the whole answer and allocate one string per fence even when only
+ * the first few can be afforded.
+ */
+function* fenceBodies(text: string): Generator<string> {
+  for (const match of text.matchAll(/```(?:json)?[ \t]*\r?\n?([\s\S]*?)```/g)) {
+    yield match[1] ?? ''
+  }
+}
+
+/**
+ * The total work one {@link locateReport} pass may spend before it gives up and
+ * reports nothing locatable, counted in character-equivalents and shared by
+ * every stage of that pass — the fence candidates and the brace scan alike.
  *
  * Every candidate `{` rescans forward from its own position, so an answer that
  * is a long run of never-balancing `{` is quadratic in its length: measured
  * end-to-end through {@link OrcService.dispatch}, 10k `{` took 139 ms, 50k took
- * 3.4 s, and 100k took 13.3 s — synchronously, on the host's event loop.
+ * 3.4 s, and 100k took 13.3 s — synchronously, on the host's event loop. The
+ * fence stage is the same shape by a different route: it tries one `JSON.parse`
+ * per fenced block, so an answer that is a long run of empty fences reaches one
+ * attempt every few characters — measured end-to-end, `'```\n```'` repeated 1.4M
+ * times took ~4.4 s and `'```'` repeated 1.4M times took ~2.0 s, and only
+ * `src/host/cli.ts` caps stdout, so a provider answer reaching either shape is
+ * uncapped and reachable.
  *
  * Two different costs are charged against this one budget, because bounding
  * only the first is not a bound at all. Scanning a character is cheap (a few
@@ -392,12 +462,17 @@ function fenceBodies(text: string): string[] {
  * The budget is four times the 1 MiB stdout cap the CLI adapter enforces on one
  * answer, and the per-attempt charge still allows thousands of parse attempts,
  * so every wrapping a real backend produces is located exactly as before. The
- * guarantee is that the work is bounded by this many character-equivalents for
- * *any* answer, whatever its shape and whatever a provider route returns — not
- * that any particular answer is fast, and not that the bound is a wall-clock
- * one. Exhausting the budget is "nothing locatable", which the caller already
- * refuses with its bounded, redacted message; nothing is ever accepted from a
- * truncated scan.
+ * guarantee is that one {@link locateReport} pass cannot multiply work by the
+ * answer's length: after its single exact `JSON.parse` of the answer, the fence
+ * stage and the brace scan both charge the characters they examine and every
+ * `JSON.parse` attempt against this one budget, and each stops as soon as the
+ * budget is spent — so the number and the total size of the candidates tried and
+ * parsed is bounded for *any* answer, whatever its shape and whatever a provider
+ * route returns. It is not a wall-clock bound and not that any particular answer
+ * is fast: the answer is still read linearly, and the refusal path still builds
+ * its bounded excerpt from it once. Exhausting the budget is "nothing
+ * locatable", which the caller already refuses with its bounded, redacted
+ * message; nothing is ever accepted from a truncated scan.
  */
 const REPORT_SCAN_CHAR_BUDGET = 4 * 1_048_576
 
@@ -427,25 +502,24 @@ const REPORT_PARSE_ATTEMPT_CHAR_COST = 1024
  * closes before the report, and abandoning the scan there would refuse an
  * otherwise locatable answer.
  *
- * The whole scan is bounded by {@link REPORT_SCAN_CHAR_BUDGET}: the characters
- * it examines *and* the parse attempts it makes are charged against it, so once
- * the budget is spent the scan stops and reports nothing locatable. Every normal
- * answer is far inside the budget and is located exactly as it was before the
- * bound existed.
+ * The scan spends from the shared `budget` (see {@link locateReport}): the
+ * characters it examines *and* the parse attempts it makes are charged against
+ * it, so once the budget — including whatever the fence candidates already
+ * spent — is exhausted the scan stops and reports nothing locatable. Every
+ * normal answer is far inside the budget and is located exactly as it was before
+ * the bound existed.
  */
-function firstBalancedObject(text: string): unknown {
-  let charged = 0
+function firstBalancedObject(text: string, budget: ScanBudget): unknown {
   for (let start = text.indexOf('{'); start !== -1; start = text.indexOf('{', start + 1)) {
-    const remaining = REPORT_SCAN_CHAR_BUDGET - charged
+    const remaining = REPORT_SCAN_CHAR_BUDGET - budget.charged
     if (remaining <= 0) return undefined
     const { end, used } = balancedEnd(text, start, remaining)
-    charged += used
+    budget.charged += used
     if (end === -1) continue
     // Charge the attempt before making it, so a budget already too small to
     // afford a parse stops here rather than overshooting by one attempt.
-    if (charged + REPORT_PARSE_ATTEMPT_CHAR_COST > REPORT_SCAN_CHAR_BUDGET) return undefined
-    charged += REPORT_PARSE_ATTEMPT_CHAR_COST
-    const parsed = tryJson(text.slice(start, end))
+    if (!canAffordAttempt(budget)) return undefined
+    const parsed = tryJsonCharged(text.slice(start, end), budget)
     if (parsed !== undefined) return parsed
   }
   return undefined

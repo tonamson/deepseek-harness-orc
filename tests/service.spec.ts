@@ -1354,6 +1354,39 @@ describe('report location', () => {
       expect(eventNames(ports)).not.toContain('orc/review-result')
     },
   )
+
+  it.each([
+    ['```\n```', 1_400_000],
+    ['```', 1_400_000],
+  ] as [string, number][])(
+    'refuses a fence-dominated answer of %j repeated %d times quickly',
+    async (unit, count) => {
+      const ports = fakePorts()
+      const svc = new OrcService(ports)
+      await toReview(ports, svc)
+      // Every fence here is empty, so each one costs one `JSON.parse` attempt
+      // and nothing else, and the fence loop had no charge of its own:
+      // `'```\n```'` repeated 1.4M times measured ~4.4 s end-to-end and `'```'`
+      // repeated 1.4M times ~2.0 s before the fence stage spent from the scan
+      // budget. The newline shape is 9.8 MB and the other 4.2 MB; both are
+      // reachable because only `src/host/cli.ts` caps stdout, not a provider
+      // route. Charging each body and attempt stops the loop after the budget's
+      // few thousand attempts. What remains is the refusal path's linear,
+      // pre-existing excerpt over the whole answer; the threshold is loose for a
+      // slow machine while still failing the unbounded fence loop by several
+      // times.
+      ports.reports.push(rawAnswer(unit.repeat(count)))
+
+      const started = performance.now()
+      await expect(svc.dispatch(ports.supervisor, 'review', 'review task-1', signal))
+        .rejects.toThrow(/^blocking: the answer is not the report JSON: /)
+      const elapsed = performance.now() - started
+
+      expect(elapsed).toBeLessThan(1_000)
+      expect(ports.journal.events.at(-1)!.type).toBe('orc/report-rejected')
+      expect(eventNames(ports)).not.toContain('orc/review-result')
+    },
+  )
 })
 
 describe('catalog reads', () => {
