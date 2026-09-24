@@ -11,7 +11,9 @@
 
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { loadBenchmarks } from '../../src/host/index.js'
 import {
   extractBundle,
   packBundle,
@@ -110,6 +112,28 @@ describe('one-package DSH bundle archive', () => {
     const locales = archived('lib/client/locales.js')
     expect(locales).toContain("'settings.orc'")
     expect(locales).toContain('ORC_LOCALE_NS')
+  })
+
+  it('ships the measured evidence the high-risk gates require', () => {
+    // `benchmarks/` is in the manifest's `files`, so the archive carries the
+    // evidence directory the Host loads at profile start. The two shipped
+    // records are the pair a high-risk review and its independent audit need.
+    const evidence = archivedPaths()
+      .filter(path => path.startsWith('benchmarks/evidence/') && path.endsWith('.json'))
+      .sort()
+    expect(evidence).toEqual(expect.arrayContaining([
+      'benchmarks/evidence/claude_claude-sonnet-5_high_2026-09-24T03_09_19.373Z.json',
+      'benchmarks/evidence/codex_gpt-6-sol_high_2026-09-24T02_44_02.851Z.json',
+    ]))
+    for (const path of evidence) expect(existsSync(join(tree, path)), `missing archived ${path}`).toBe(true)
+
+    // The extracted records really load: a record that stops matching the
+    // loader is a missing high-risk route, not a packaging detail.
+    const snapshot = loadBenchmarks(pathToFileURL(join(tree, 'benchmarks', 'evidence')))
+    expect(snapshot.records.map(record => record.id)).toEqual(expect.arrayContaining([
+      'claude:claude-sonnet-5:high:2026-09-24T03:09:19.373Z',
+      'codex:gpt-6-sol:high:2026-09-24T02:44:02.851Z',
+    ]))
   })
 
   it('publishes no workspace-only dependency anywhere in the manifest or lockfile', () => {

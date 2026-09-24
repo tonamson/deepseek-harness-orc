@@ -36,6 +36,11 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterAll, describe, expect, it } from 'vitest'
+import { routeKey, parseConfig } from '../src/domain/config.js'
+import { backendIdentity } from '../src/domain/evidence.js'
+import type { RiskDecision } from '../src/domain/risk.js'
+import { selectRoute } from '../src/domain/routing.js'
+import type { CatalogSnapshot, Route } from '../src/domain/types.js'
 import { EVIDENCE_DIR, loadBenchmarks } from '../src/host/index.js'
 import { evidenceFilename, extractAssistantText, findingsOf } from '../scripts/benchmark.mjs'
 
@@ -242,6 +247,95 @@ describe('shipped benchmark evidence', () => {
     const result = run('--verify-fixtures')
     expect(result.stderr).toBe('')
     expect(result.stdout).toContain('verified 6 fixtures')
+  })
+})
+
+describe('shipped evidence routes the high-risk gates', () => {
+  /** The two records this bundle ships, by the id inside each file. */
+  const SHIPPED = [
+    'claude:claude-sonnet-5:high:2026-09-24T03:09:19.373Z',
+    'codex:gpt-6-sol:high:2026-09-24T02:44:02.851Z',
+  ].sort()
+
+  /** The live catalog entries the shipped records were measured against. */
+  const liveRoutes: Route[] = [
+    { kind: 'cli', cli: 'codex', model: 'gpt-6-sol', effort: 'high' },
+    { kind: 'cli', cli: 'claude', model: 'claude-sonnet-5', effort: 'high' },
+  ]
+
+  /** A live catalog that observed exactly the versions the records measured. */
+  const liveCatalog: CatalogSnapshot = {
+    id: 'live-catalog',
+    observedAt: '2026-09-25T00:00:00Z',
+    entries: [
+      {
+        routeKey: routeKey(liveRoutes[0]!),
+        backendVersion: '0.156.1',
+        model: 'gpt-6-sol',
+        efforts: ['high'],
+        accountAccess: true,
+        sourceUrl: '',
+        retrievedAt: '2026-09-25T00:00:00Z',
+      },
+      {
+        routeKey: routeKey(liveRoutes[1]!),
+        backendVersion: '2.1.281',
+        model: 'claude-sonnet-5',
+        efforts: ['high'],
+        accountAccess: true,
+        sourceUrl: '',
+        retrievedAt: '2026-09-25T00:00:00Z',
+      },
+    ],
+  }
+
+  const highRisk: RiskDecision = { path: 'orc', risk: 'high', reasons: ['high-impact'] }
+
+  it('loads the shipped records and admits a high-risk review and an independent audit', () => {
+    // The shipped directory is the one the archive carries and the Host loads
+    // at profile start. Pinning `now` inside the freshness window keeps the
+    // assertion about the records, not about the wall clock.
+    const now = '2026-09-25T00:00:00Z'
+    const snapshot = loadBenchmarks()
+    expect(snapshot.records.map(record => record.id).sort()).toEqual(SHIPPED)
+    expect(snapshot.suiteRevision).toBe('orc-review-v1')
+
+    const config = parseConfig({ analysisMode: 'auto', allowed: liveRoutes })
+    const review = selectRoute('review', highRisk, config, liveCatalog, snapshot, now)
+
+    // Both shipped records clear the review floor; the higher validated quality
+    // wins, and the paired audit must then use the other backend.
+    expect(review.benchmarkId).not.toBeNull()
+    expect(review.estimatedCostUsd).toBe(0)
+    const audit = selectRoute('audit', highRisk, config, liveCatalog, snapshot, now, review)
+    expect(backendIdentity(audit.route)).not.toBe(backendIdentity(review.route))
+    expect(audit.benchmarkId).not.toBeNull()
+    expect(audit.benchmarkId).not.toBe(review.benchmarkId)
+
+    // The pair really is the two shipped backends, one record each.
+    expect([backendIdentity(review.route), backendIdentity(audit.route)].sort()).toEqual(['claude', 'codex'])
+    expect([review.benchmarkId, audit.benchmarkId].map(id => id?.split('/').at(-1)).sort())
+      .toEqual(SHIPPED)
+  })
+
+  it('refuses the high-risk gates when a shipped record stops matching the live version', () => {
+    const now = '2026-09-25T00:00:00Z'
+    const snapshot = loadBenchmarks()
+    // A live catalog one version away from the measured build: the documented
+    // CLI minimum for Claude, and the exact-version rule this test protects.
+    const drifted: CatalogSnapshot = {
+      ...liveCatalog,
+      entries: liveCatalog.entries.map(entry =>
+        entry.routeKey === routeKey(liveRoutes[1]!) ? { ...entry, backendVersion: '2.1.280' } : entry),
+    }
+    const config = parseConfig({ analysisMode: 'auto', allowed: liveRoutes })
+
+    // Only codex is still admissible, so the review runs but its audit has no
+    // independent backend left and is refused.
+    const review = selectRoute('review', highRisk, config, drifted, snapshot, now)
+    expect(backendIdentity(review.route)).toBe('codex')
+    expect(() => selectRoute('audit', highRisk, config, drifted, snapshot, now, review))
+      .toThrow(/no-independent-route/)
   })
 })
 

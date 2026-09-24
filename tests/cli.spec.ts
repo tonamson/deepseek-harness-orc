@@ -156,6 +156,36 @@ it('rejects the real Codex shape for the Claude product', () => {
   expect(() => parseCliVersion('codex-cli 0.156.1', 'claude')).toThrow(/version/)
 })
 
+/* M2: the fixtures' raw `--version` stdout is the input the adapter parses, so
+ * it is pinned here verbatim. Without this, reverting a fixture to the
+ * plan-pinned shape (`codex 0.156.1`, `2.1.280`) would keep every other
+ * assertion in this suite green — the defect class behind R21 and R36. */
+
+/** Run one fixture executable directly and return its stdout, verbatim. */
+function fixtureStdout(fixture: string, ...args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const executable = fileURLToPath(new URL(`./fixtures/${fixture}`, import.meta.url))
+    const child = spawn(process.execPath, [executable, ...args], { stdio: ['ignore', 'pipe', 'pipe'] })
+    let stdout = ''
+    child.stdout.setEncoding('utf8')
+    child.stdout.on('data', chunk => {
+      stdout += String(chunk)
+    })
+    child.once('error', reject)
+    child.once('close', () => resolve(stdout))
+  })
+}
+
+it.each([
+  ['fake-codex.mjs', 'codex', 'codex-cli 0.156.1', '0.156.1'],
+  ['fake-claude.mjs', 'claude', '2.1.280 (Claude Code)', '2.1.280'],
+] as const)('prints the real --version stdout from %s', async (fixture, cli, expected, version) => {
+  const stdout = await fixtureStdout(fixture, '--version')
+  expect(stdout).toBe(`${expected}\n`)
+  // The pinned line is exactly what the real parser accepts.
+  expect(parseCliVersion(stdout.trim(), cli)).toMatchObject({ version, prerelease: '', supported: true })
+})
+
 it('strips ANSI from the diagnostic and reports invalid-version', () => {
   const failure: unknown = (() => {
     try {
