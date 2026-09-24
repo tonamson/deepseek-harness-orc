@@ -51,6 +51,7 @@
 
 import { createHash } from 'node:crypto'
 import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
+import type { ContentBlock, MessageId } from '@deepseek-ai/dsh-llm'
 import { SessionId, type Session } from '@deepseek-ai/dsh-session'
 import type { ContinuableStart, ContinuableStartSpec, SubagentCapabilities } from '@deepseek-ai/dsh-subagent'
 import type { ToolRestriction } from '@deepseek-ai/dsh-tools'
@@ -75,6 +76,7 @@ import {
   type Actor,
   type OrcEvent,
   type OrcState,
+  type QuestionRecord,
   type RequestStage,
 } from '../domain/workflow.js'
 import { CliError, safeExcerpt, type CliProbe } from './cli.js'
@@ -276,6 +278,7 @@ export interface OrcSubagentPort {
     readonly prepareContinuable?: (...args: never[]) => unknown
   } | undefined
   startContinuable(spec: ContinuableStartSpec): Promise<ContinuableStart>
+  sendMessage(sender: Agent, targetId: SessionId, content: ContentBlock[], options: { signal: AbortSignal }): Promise<MessageId>
 }
 
 /** The live-agent lookup seam; `ctx.agents` satisfies it. */
@@ -774,6 +777,61 @@ export class OrcService {
         type: 'task-settle',
         taskId,
       })
+    })
+  }
+
+  /**
+   * Record one question a peer cannot answer itself.
+   *
+   * The peer cannot ask the human: DSH refuses human interaction to any owned
+   * child. A repeated raise with the same task and text is the same question, so
+   * it returns the committed state instead of appending a duplicate.
+   */
+  async raiseQuestion(peer: Agent, taskId: string, question: string): Promise<OrcState> {
+    const runId = this.runIdOf(peer)
+    return await this.serialize(runId, async () => {
+      const session = this.sessionOf(runId)
+      const state = this.ports.journal.state(session)
+      const questionId = questionIdentity(peer, taskId, question)
+      if (state.questions.some(candidate => candidate.id === questionId)) return state
+      return await this.commit(session, {
+        ...this.envelope(runId, 'peer', peer.id),
+        type: 'question-raise',
+        questionId,
+        taskId,
+        question,
+      })
+    })
+  }
+
+  /**
+   * Answer one open question and deliver the answer to the peer that raised it.
+   *
+   * The answer is committed before it is delivered, so a crash between the two
+   * leaves a durable answer. An already-answered question is not an error: the
+   * recorded answer is delivered again, which is the retry path when a delivery
+   * fails. Re-delivering the recorded answer means a second call can never
+   * overwrite a decision the run already committed.
+   */
+  async answerQuestion(supervisor: Agent, questionId: string, answer: string): Promise<OrcState> {
+    const runId = this.runIdOf(supervisor)
+    return await this.serialize(runId, async () => {
+      const session = this.sessionOf(runId)
+      const state = this.ports.journal.state(session)
+      const existing = state.questions.find(candidate => candidate.id === questionId)
+      if (existing?.status === 'answered') {
+        await this.deliverAnswer(supervisor, existing)
+        return state
+      }
+      const next = await this.commit(session, {
+        ...this.envelope(runId, 'supervisor', supervisor.id),
+        type: 'question-answer',
+        questionId,
+        answer,
+      })
+      const answered = next.questions.find(candidate => candidate.id === questionId)
+      if (answered !== undefined) await this.deliverAnswer(supervisor, answered)
+      return next
     })
   }
 
@@ -1676,6 +1734,20 @@ export class OrcService {
     }
   }
 
+  /** Send one answered question to the peer it blocks. */
+  private async deliverAnswer(supervisor: Agent, question: QuestionRecord): Promise<void> {
+    const subagents = this.ports.subagents
+    if (subagents === undefined) {
+      throw new OrcServiceError('the DSH subagent runtime is not mounted; ORC cannot deliver an answer')
+    }
+    await subagents.sendMessage(
+      supervisor,
+      SessionId(question.peerId),
+      [{ type: 'text', text: `ORC question ${question.id} was answered: ${question.answer ?? ''}` }],
+      { signal: this.lifetime.signal },
+    )
+  }
+
   /**
    * The agent options one ORC child inherits.
    *
@@ -1732,4 +1804,17 @@ export function peerIdentity(lead: Agent, name: string): string {
   const safe = name.trim().replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48)
   if (safe === '') throw new OrcServiceError('a peer needs a name')
   return `${idOf(lead.id)}-orc-peer-${safe}`
+}
+
+/**
+ * The durable identity of one peer question.
+ *
+ * Derived from the peer, the task, and the question text so a retried raise
+ * addresses the same question instead of appending a duplicate. The separator is
+ * a NUL byte so no combination of task id and question text can collide with a
+ * different pair.
+ */
+export function questionIdentity(peer: Agent, taskId: string, question: string): string {
+  const digest = createHash('sha256').update(`${taskId}\u0000${question}`).digest('hex').slice(0, 16)
+  return `${idOf(peer.id)}-orc-q-${digest}`
 }

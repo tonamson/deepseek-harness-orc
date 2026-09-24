@@ -1451,3 +1451,56 @@ it('refuses to create a child when the provider cannot restrict its tools', asyn
   ports.subagents.setToolFilter(false)
   await expect(service.createLead(ports.supervisor)).rejects.toThrow(/cannot restrict child tools/)
 })
+
+it('records a peer question and delivers the Supervisor answer to that peer', async () => {
+  const ports = fakePorts()
+  const service = new OrcService(ports)
+  await toImplement(ports, service)
+  const lead = await service.createLead(ports.supervisor)
+  const peer = await service.createPeer(lead, 'impl')
+  await service.startTask(lead, peer, 'task-1')
+
+  const raised = await service.raiseQuestion(peer, 'task-1', 'which database?')
+  const questionId = raised.questions[0]?.id
+  expect(questionId).toBeDefined()
+  expect(raised.questions[0]).toMatchObject({ status: 'open', taskId: 'task-1' })
+
+  await service.answerQuestion(ports.supervisor, questionId!, 'postgres')
+  expect(ports.subagents.sent).toHaveLength(1)
+  expect(ports.subagents.sent[0]?.to).toBe(String(peer.id))
+  expect(ports.subagents.sent[0]?.text).toContain('postgres')
+  expect(service.state(ports.supervisor).questions[0]).toMatchObject({ status: 'answered', answer: 'postgres' })
+})
+
+it('raises the same question idempotently for the same peer, task, and text', async () => {
+  const ports = fakePorts()
+  const service = new OrcService(ports)
+  await toImplement(ports, service)
+  const lead = await service.createLead(ports.supervisor)
+  const peer = await service.createPeer(lead, 'impl')
+  await service.startTask(lead, peer, 'task-1')
+  const first = await service.raiseQuestion(peer, 'task-1', 'which database?')
+  const second = await service.raiseQuestion(peer, 'task-1', 'which database?')
+  expect(second.questions).toHaveLength(1)
+  expect(second.questions[0]?.id).toBe(first.questions[0]?.id)
+})
+
+it('keeps the answer durable when delivery fails and re-delivers the recorded answer on retry', async () => {
+  const ports = fakePorts()
+  const service = new OrcService(ports)
+  await toImplement(ports, service)
+  const lead = await service.createLead(ports.supervisor)
+  const peer = await service.createPeer(lead, 'impl')
+  await service.startTask(lead, peer, 'task-1')
+  const raised = await service.raiseQuestion(peer, 'task-1', 'which database?')
+  const questionId = raised.questions[0]!.id
+
+  ports.subagents.failNextSend(new Error('inbox closed'))
+  await expect(service.answerQuestion(ports.supervisor, questionId, 'postgres')).rejects.toThrow(/inbox closed/)
+  expect(service.state(ports.supervisor).questions[0]).toMatchObject({ status: 'answered', answer: 'postgres' })
+
+  await service.answerQuestion(ports.supervisor, questionId, 'mysql')
+  expect(ports.subagents.sent).toHaveLength(1)
+  expect(ports.subagents.sent[0]?.text).toContain('postgres')
+  expect(ports.subagents.sent[0]?.text).not.toContain('mysql')
+})

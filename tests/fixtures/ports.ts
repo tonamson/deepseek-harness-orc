@@ -308,6 +308,10 @@ export interface FakeSubagents extends OrcSubagentPort {
   }[]
   /** Every published child, keyed by child id. */
   readonly children: Map<string, FakeAgent>
+  /** Every message the service delivered, in order. */
+  readonly sent: { from: string; to: string; text: string }[]
+  /** Make the next delivery fail. */
+  failNextSend(error: Error | undefined): void
   /** Make the next start fail. */
   failNextStart(error: Error | undefined): void
   /** Withdraw the continuable capability. */
@@ -445,6 +449,8 @@ export function session(id: string, parent?: string): Session {
 function fakeSubagents(deps: { agents: OrcAgentPort & { live: Map<string, FakeAgent> }; now: string }): FakeSubagents {
   const starts: FakeSubagents['starts'] = []
   const children = new Map<string, FakeAgent>()
+  const sent: FakeSubagents['sent'] = []
+  let sendFailure: Error | undefined
   let capable = true
   let filterCapable = true
   let failure: Error | undefined
@@ -459,6 +465,23 @@ function fakeSubagents(deps: { agents: OrcAgentPort & { live: Map<string, FakeAg
   return {
     starts,
     children,
+    sent,
+    failNextSend: (error) => {
+      sendFailure = error
+    },
+    sendMessage: async (sender, targetId, content) => {
+      if (sendFailure !== undefined) {
+        const error = sendFailure
+        sendFailure = undefined
+        throw error
+      }
+      sent.push({
+        from: String(sender.id),
+        to: String(targetId),
+        text: content.map(block => (block.type === 'text' ? block.text : '')).join(''),
+      })
+      return MessageId(`message-${sent.length}`)
+    },
     failNextStart: (error) => {
       failure = error
     },

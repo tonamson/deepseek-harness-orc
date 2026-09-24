@@ -341,6 +341,8 @@ export interface HarnessSubagents extends OrcSubagentPort {
   readonly starts: { label: string; childId: string | undefined; parentId: string }[]
   /** Every published child, keyed by child id. */
   readonly children: Map<string, FakeAgent>
+  /** Every message the service delivered, in order. */
+  readonly sent: { from: string; to: string; text: string }[]
   /** Hold the next child startup until the returned release runs. */
   holdNextStart(): () => void
 }
@@ -349,6 +351,7 @@ export interface HarnessSubagents extends OrcSubagentPort {
 function harnessSubagents(agents: Map<string, FakeAgent>): HarnessSubagents {
   const starts: HarnessSubagents['starts'] = []
   const children = new Map<string, FakeAgent>()
+  const sent: HarnessSubagents['sent'] = []
   let gate: { promise: Promise<void>; release: () => void } | undefined
   let counter = 0
   const capabilities: SubagentCapabilities = {
@@ -361,6 +364,15 @@ function harnessSubagents(agents: Map<string, FakeAgent>): HarnessSubagents {
   return {
     starts,
     children,
+    sent,
+    sendMessage: async (sender, targetId, content) => {
+      sent.push({
+        from: String(sender.id),
+        to: String(targetId),
+        text: content.map(block => (block.type === 'text' ? block.text : '')).join(''),
+      })
+      return MessageId(`message-${sent.length}`)
+    },
     holdNextStart: () => {
       let release = (): void => {}
       const promise = new Promise<void>((settle) => {
