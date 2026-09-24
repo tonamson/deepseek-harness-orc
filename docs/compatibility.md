@@ -77,7 +77,7 @@ committed as the `./client` export (`lib/client.js`):
 
 ```js
 window.__ModuleLoader__.load({
-  id: '@tonamson/dsh-orc',
+  id: '@tonamson2/dsh-orc',
   factory(require) {
     const module = { exports: {} }
     const exports = module.exports
@@ -347,6 +347,11 @@ $ node ./.typert-probe.mjs
 [a2] after dispose -> endpoint: undefined | package: undefined
 ```
 
+> The `[a2]` lines above are the probe's verbatim output, captured before the
+> package moved from the `@tonamson` scope to `@tonamson2`. They keep the old
+> scope because a transcript records what ran rather than what the package is
+> called now; every live example in this document uses `@tonamson2/dsh-orc`.
+
 Two independent results, both stronger than the report's BLOCKED verdict:
 
 1. **SRC discovery (no contribution at all).** With **zero** registered strict
@@ -443,7 +448,7 @@ holds `ctx.remote` may therefore mount its own contribution in its own fiber.
 
 `src/client/remote.ts` is that contribution, hand-written and plain data:
 
-- `{ package: '@tonamson/dsh-orc', descriptors: [...] }` with one descriptor per
+- `{ package: '@tonamson2/dsh-orc', descriptors: [...] }` with one descriptor per
   host `@Remote` method — `orc/getCatalog` (no business parameters, `signal`
   cancellation), `orc/probe` (`route`), `orc/getConnectionResult` (`routeKey`);
 - strict input codecs, which the client Gateway requires
@@ -553,7 +558,7 @@ version; the presence of `cordis.patch.yml`, `lib/host/index.js`,
 `lib/host/remote-host.js`, the lazy-CJS `lib/client.js`, `lib/client/locales.js`
 (the `settings.orc` namespace), `README.md`, and the benchmark fixtures; the two
 Loader rows and only those rows; the lazy-CJS factory shape
-(`window.__ModuleLoader__.load({ id: '@tonamson/dsh-orc', factory(require) … })`);
+(`window.__ModuleLoader__.load({ id: '@tonamson2/dsh-orc', factory(require) … })`);
 and that the whole manifest and lockfile contain no `workspace:` dependency.
 The `README.md` assertion is load-bearing: it is listed in `package.json`
 `files`, so a missing README cannot pass silently.

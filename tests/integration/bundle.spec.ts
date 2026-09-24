@@ -58,7 +58,7 @@ describe('one-package DSH bundle archive', () => {
   it('packs exactly one package under the published name and version', () => {
     expect(packed.name).toBe(PACKAGE_NAME)
     expect(packed.version).toBe(manifest.version)
-    expect(packed.filename).toBe(`tonamson-dsh-orc-${manifest.version}.tgz`)
+    expect(packed.filename).toBe(`${PACKAGE_NAME.replace(/^@/, '').replace('/', '-')}-${manifest.version}.tgz`)
   })
 
   it('declares one bundle patch and a Web client', () => {
@@ -152,6 +152,7 @@ describe('one-package DSH bundle archive', () => {
     for (const [name, range] of dshPeers) {
       expect(range, `${name} must be pinned exactly`).toBe('0.1.6-alpha.2')
     }
-    expect(manifest.private).toBe(true)
+    expect(manifest.private).not.toBe(true)
+    expect((manifest.publishConfig as Record<string, string> | undefined)?.access).toBe('public')
   })
 })

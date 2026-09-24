@@ -167,7 +167,7 @@ describe('bundle wiring', () => {
       default: './lib/host/remote-host.js',
     })
     expect(patch).toContain('id: orc-remote-host')
-    expect(patch).toContain("name: '@tonamson/dsh-orc/remote-host'")
+    expect(patch).toContain("name: '@tonamson2/dsh-orc/remote-host'")
     expect(patch).toContain('inject: [orc]')
     expect(patch).toContain('inject: [settings]')
   })

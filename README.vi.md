@@ -2,7 +2,7 @@
 
 [English](README.md) | **Tiếng Việt**
 
-`@tonamson/dsh-orc` là một package bundle DSH duy nhất, thêm workflow ORC vào một
+`@tonamson2/dsh-orc` là một package bundle DSH duy nhất, thêm workflow ORC vào một
 profile DeepSeek Harness: một run Supervisor → Lead → Peer với review và security
 audit tách biệt, được định tuyến qua provider/model hoặc host CLI mà bạn chọn.
 
@@ -35,14 +35,14 @@ hơn `0.156.1` sẽ mất route high-risk cho tới khi bạn đo chính phiên 
 Cài package bundle duy nhất vào một profile Web:
 
 ```sh
-dsh plugin --profile web add @tonamson/dsh-orc
+dsh plugin --profile web add @tonamson2/dsh-orc
 ```
 
 Từ bản build cục bộ, cài tarball đã pack bằng đường dẫn tuyệt đối:
 
 ```sh
 npm pack
-dsh plugin --profile web add file:/absolute/path/to/tonamson-dsh-orc-0.1.0.tgz
+dsh plugin --profile web add file:/absolute/path/to/tonamson2-dsh-orc-0.1.0.tgz
 ```
 
 Cũng có thể cài từ trang **Plugins** của DSH. Việc cài đặt sẽ chọn bundle layer và
@@ -55,8 +55,8 @@ Tắt bundle sẽ gỡ mọi đóng góp runtime — service `orc`, tool `orc`, 
 profile, standard preset, global model default và provider credential. Bật lại sẽ
 khôi phục chúng. Gỡ package sẽ xoá nó khỏi profile.
 
-- Trang Plugins: bật/tắt bundle `@tonamson/dsh-orc`.
-- File profile: thêm hoặc bỏ `@tonamson/dsh-orc` trong
+- Trang Plugins: bật/tắt bundle `@tonamson2/dsh-orc`.
+- File profile: thêm hoặc bỏ `@tonamson2/dsh-orc` trong
   `$DSH_HOME/profiles/web/package.json` tại `dsh.profile.bundles`, rồi khởi động
   lại profile.
 

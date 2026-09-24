@@ -95,8 +95,9 @@ describe('supported DSH version set', () => {
     expect(compatibility).toMatch(/settingsScope/)
   })
 
-  it('keeps the release private until an explicit publish instruction', () => {
-    expect(manifest.private).toBe(true)
+  it('publishes publicly once the release is switched on', () => {
+    expect(manifest.private).not.toBe(true)
+    expect((manifest.publishConfig as Record<string, string> | undefined)?.access).toBe('public')
   })
 })
 

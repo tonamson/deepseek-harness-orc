@@ -43,7 +43,7 @@ import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-ses
 /** The repository root, so `npm pack` and the DSH CLI resolve. */
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 /** The one user-facing bundle package. */
-const PACKAGE_NAME = '@tonamson/dsh-orc'
+const PACKAGE_NAME = '@tonamson2/dsh-orc'
 /** The one DSH version this release supports (R15: no range). */
 const SUPPORTED = '0.1.6-alpha.2'
 /** The two Loader rows the bundle patch declares. */

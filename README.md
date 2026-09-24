@@ -2,7 +2,7 @@
 
 **English** | [Tiếng Việt](README.vi.md)
 
-`@tonamson/dsh-orc` is one DSH bundle package that adds the ORC workflow to a
+`@tonamson2/dsh-orc` is one DSH bundle package that adds the ORC workflow to a
 DeepSeek Harness profile: a Supervisor → Lead → Peer run with separate review
 and security audit, routed through the provider/model or host CLI you choose.
 
@@ -35,14 +35,14 @@ lose the high-risk route until you measure that version — see
 Install the one bundle package into a Web profile:
 
 ```sh
-dsh plugin --profile web add @tonamson/dsh-orc
+dsh plugin --profile web add @tonamson2/dsh-orc
 ```
 
 From a local build, install the packed tarball by absolute path:
 
 ```sh
 npm pack
-dsh plugin --profile web add file:/absolute/path/to/tonamson-dsh-orc-0.1.0.tgz
+dsh plugin --profile web add file:/absolute/path/to/tonamson2-dsh-orc-0.1.0.tgz
 ```
 
 The same installation is available from the DSH **Plugins** page. Installing
@@ -56,8 +56,8 @@ page — while leaving the rest of the profile composition, the standard preset,
 the global model defaults, and provider credentials untouched. Re-enabling
 restores them. Removing the package removes it from the profile.
 
-- Plugins page: toggle the `@tonamson/dsh-orc` bundle.
-- Profile file: add or remove `@tonamson/dsh-orc` in
+- Plugins page: toggle the `@tonamson2/dsh-orc` bundle.
+- Profile file: add or remove `@tonamson2/dsh-orc` in
   `$DSH_HOME/profiles/web/package.json` under `dsh.profile.bundles`, then
   restart the profile.
 

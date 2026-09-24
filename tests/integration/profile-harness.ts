@@ -64,7 +64,7 @@ import { config as fixtureConfig } from '../fixtures/routes.js'
 export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 
 /** The one user-facing bundle package this repository publishes. */
-export const PACKAGE_NAME = '@tonamson/dsh-orc'
+export const PACKAGE_NAME = '@tonamson2/dsh-orc'
 
 /** The two Loader rows the bundle patch declares. */
 export const BUNDLE_ROWS = ['orc-host', 'orc-remote-host'] as const

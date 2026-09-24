@@ -1,8 +1,10 @@
 {
-  "name": "@tonamson/dsh-orc",
+  "name": "@tonamson2/dsh-orc",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
   "files": ["lib", "cordis.patch.yml", "README.md", "README.vi.md", "benchmarks", "scripts"],
   "exports": {
     ".": { "types": "./lib/types/host/index.d.ts", "default": "./lib/host/index.js" },
@@ -23,6 +25,7 @@
   },
   "scripts": {
     "build": "node scripts/build.mjs",
+    "prepack": "npm run build",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "pack:check": "npm run build && npm pack --dry-run --json"

@@ -29,7 +29,7 @@ import type { CatalogSnapshot, Route } from '../domain/types.js'
 import type { OrcConnectionView, OrcRemotePort } from './OrcSettingsPage.js'
 
 /** The npm package that owns these Remote methods. */
-export const ORC_REMOTE_PACKAGE = '@tonamson/dsh-orc'
+export const ORC_REMOTE_PACKAGE = '@tonamson2/dsh-orc'
 
 /** The exact wire namespace the ORC Remote host row exports. */
 export const ORC_REMOTE_NAMESPACE = 'orc'

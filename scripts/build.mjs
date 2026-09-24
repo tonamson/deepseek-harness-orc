@@ -10,7 +10,7 @@ const result = await build({
 })
 const cjs = result.outputFiles[0].text
 await writeFile('lib/client.js', `window.__ModuleLoader__.load({
-  id: '@tonamson/dsh-orc',
+  id: '@tonamson2/dsh-orc',
   factory(require) {
     const module = { exports: {} }
     const exports = module.exports

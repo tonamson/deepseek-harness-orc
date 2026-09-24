@@ -10,9 +10,9 @@
 
 - insert:
     - id: orc-host
-      name: '@tonamson/dsh-orc'
+      name: '@tonamson2/dsh-orc'
       inject: [settings]
 
     - id: orc-remote-host
-      name: '@tonamson/dsh-orc/remote-host'
+      name: '@tonamson2/dsh-orc/remote-host'
       inject: [orc]

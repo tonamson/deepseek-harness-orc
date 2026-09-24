@@ -453,7 +453,7 @@ describe('ORC client entry', () => {
     await vi.waitFor(() => expect(service.mounts).toHaveLength(1))
     const [mount] = service.mounts
     expect(mount.contribution).toBe(ORC_REMOTE_CONTRIBUTION)
-    expect(mount.contribution.package).toBe('@tonamson/dsh-orc')
+    expect(mount.contribution.package).toBe('@tonamson2/dsh-orc')
     expect(mount.contribution.descriptors.map(descriptor => `${descriptor.namespace}/${descriptor.method}`))
       .toEqual(['orc/getCatalog', 'orc/probe', 'orc/getConnectionResult'])
     expect(mount.disposals).toBe(0)
