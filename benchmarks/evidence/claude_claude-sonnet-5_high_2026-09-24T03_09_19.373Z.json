@@ -1,0 +1,97 @@
+{
+  "id": "claude:claude-sonnet-5:high:2026-09-24T03:09:19.373Z",
+  "suiteRevision": "orc-review-v1",
+  "backend": "claude",
+  "model": "claude-sonnet-5",
+  "effort": "high",
+  "backendVersion": "2.1.281",
+  "date": "2026-09-24T03:09:19.373Z",
+  "scope": [
+    "financial",
+    "security"
+  ],
+  "detectionScore": 1,
+  "falsePositiveScore": 0,
+  "latencyMs": 50293,
+  "costUsd": 0,
+  "perFixture": [
+    {
+      "id": "fin-round-up",
+      "scope": "financial",
+      "expected": [
+        "rounding-overpays"
+      ],
+      "reported": [
+        "rounding-overpays"
+      ],
+      "detected": [
+        "rounding-overpays"
+      ],
+      "falsePositives": [],
+      "detection": 1
+    },
+    {
+      "id": "fin-double-settle",
+      "scope": "financial",
+      "expected": [
+        "duplicate-credit"
+      ],
+      "reported": [
+        "duplicate-credit"
+      ],
+      "detected": [
+        "duplicate-credit"
+      ],
+      "falsePositives": [],
+      "detection": 1
+    },
+    {
+      "id": "sec-auth-bypass",
+      "scope": "security",
+      "expected": [
+        "authorization-bypass"
+      ],
+      "reported": [
+        "authorization-bypass"
+      ],
+      "detected": [
+        "authorization-bypass"
+      ],
+      "falsePositives": [],
+      "detection": 1
+    },
+    {
+      "id": "sec-secret-log",
+      "scope": "security",
+      "expected": [
+        "secret-in-log"
+      ],
+      "reported": [
+        "secret-in-log"
+      ],
+      "detected": [
+        "secret-in-log"
+      ],
+      "falsePositives": [],
+      "detection": 1
+    },
+    {
+      "id": "clean-round",
+      "scope": "financial",
+      "expected": [],
+      "reported": [],
+      "detected": [],
+      "falsePositives": [],
+      "detection": null
+    },
+    {
+      "id": "clean-auth",
+      "scope": "security",
+      "expected": [],
+      "reported": [],
+      "detected": [],
+      "falsePositives": [],
+      "detection": null
+    }
+  ]
+}
