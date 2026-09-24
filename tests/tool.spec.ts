@@ -102,6 +102,7 @@ describe('Agent-scoped installation', () => {
     const properties = (schema.parameters as { properties: Record<string, unknown> }).properties
     expect(Object.keys(properties).sort()).toEqual([
       'action',
+      'answer',
       'architectureChange',
       'discoveredRisk',
       'explicitPlanOrReview',
@@ -110,6 +111,8 @@ describe('Agent-scoped installation', () => {
       'peerName',
       'plannedFiles',
       'prompt',
+      'question',
+      'questionId',
       'reason',
       'request',
       'stage',
@@ -414,6 +417,68 @@ describe('tool actions', () => {
     const { tool } = install(ports, service)
     await expect(tool.execute({ action: 'status' }, { signal } as unknown as ToolRunContext))
       .rejects.toThrow(/calling agent/)
+  })
+
+  it('raises a question as the peer that owns the task', async () => {
+    const ports = fakePorts()
+    const service = new OrcService(ports)
+    const { agent, tool } = install(ports, service)
+    await service.start(agent, HIGH_RISK)
+    await service.dispatch(agent, 'spec', 'spec input', signal)
+    await service.dispatch(agent, 'plan', 'plan input', signal)
+    const lead = await service.createLead(agent)
+    const peer = await service.createPeer(lead, 'peer-1')
+    await service.startTask(lead, peer, 'task-1')
+
+    const value = (await tool.execute(
+      { action: 'raise-question', taskId: 'task-1', question: 'which database?' },
+      execFor(peer),
+    )) as { questions: string[] }
+    expect(value.questions).toHaveLength(1)
+    expect(value.questions[0]).toMatch(/:open$/)
+  })
+
+  it('answers a question as the supervisor and refuses a non-supervisor', async () => {
+    const ports = fakePorts()
+    const service = new OrcService(ports)
+    const { agent, tool } = install(ports, service)
+    await service.start(agent, HIGH_RISK)
+    await service.dispatch(agent, 'spec', 'spec input', signal)
+    await service.dispatch(agent, 'plan', 'plan input', signal)
+    const lead = await service.createLead(agent)
+    const peer = await service.createPeer(lead, 'peer-1')
+    await service.startTask(lead, peer, 'task-1')
+
+    const raised = (await tool.execute(
+      { action: 'raise-question', taskId: 'task-1', question: 'which database?' },
+      execFor(peer),
+    )) as { questions: string[] }
+    const questionId = raised.questions[0]!.split(':')[0]!
+
+    await expect(tool.execute({ action: 'answer-question', questionId, answer: 'postgres' }, execFor(peer))).rejects.toThrow(
+      /authority/,
+    )
+    const answered = (await tool.execute(
+      { action: 'answer-question', questionId, answer: 'postgres' },
+      execFor(agent),
+    )) as { questions: string[] }
+    expect(answered.questions[0]).toBe(`${questionId}:answered`)
+  })
+
+  it('exposes open questions in every tool result', async () => {
+    const ports = fakePorts()
+    const service = new OrcService(ports)
+    const { agent, tool } = install(ports, service)
+    await service.start(agent, HIGH_RISK)
+    await service.dispatch(agent, 'spec', 'spec input', signal)
+    await service.dispatch(agent, 'plan', 'plan input', signal)
+    const lead = await service.createLead(agent)
+    const peer = await service.createPeer(lead, 'peer-1')
+    await service.startTask(lead, peer, 'task-1')
+    await tool.execute({ action: 'raise-question', taskId: 'task-1', question: 'which database?' }, execFor(peer))
+
+    const status = (await tool.execute({ action: 'status' }, execFor(agent))) as { questions: string[] }
+    expect(status.questions).toHaveLength(1)
   })
 })
 

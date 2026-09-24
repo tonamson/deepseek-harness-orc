@@ -54,7 +54,9 @@ Classify every request before implementing it, and use the \`orc\` tool to recor
 
 Once ORC starts, this session is the Supervisor of an ORC run: the run's Lead owns tasks, reviews, and fixes; Peers implement. The ORC service validates role authority, phase order, task settlement, review and audit results, fixes, and completion — a phase or authority refusal is final until the state that caused it changes.
 The Lead and Peer children inherit this session's live provider, model, and effort, because a DSH child agent can only be given a DSH provider route. The configured **code route** — including the DeepSeek Flash v4.1 high default — therefore governs exactly one thing: an explicit \`dispatch\` with \`stage: "code"\`, which ORC routes and runs on that route. It does not move the Supervisor or the hierarchy.
-Review and security audit are separate stages, and the final branch review and audit are separate gates that ORC routes and dispatches itself. Every one of them runs on a route ORC selects, and ORC states the exact report format to the backend it dispatches to; a report you write is never accepted in place of the report the selected backend produced. Critical, high, and medium findings block until they are fixed and re-reviewed. A failed, malformed, missing, or unavailable review or audit is blocking and is never a clean result: a malformed report leaves the run blocked in its stage, so the same stage can be dispatched again once the cause is fixed.`
+Review and security audit are separate stages, and the final branch review and audit are separate gates that ORC routes and dispatches itself. Every one of them runs on a route ORC selects, and ORC states the exact report format to the backend it dispatches to; a report you write is never accepted in place of the report the selected backend produced. Critical, high, and medium findings block until they are fixed and re-reviewed. A failed, malformed, missing, or unavailable review or audit is blocking and is never a clean result: a malformed report leaves the run blocked in its stage, so the same stage can be dispatched again once the cause is fixed.
+
+A Lead or Peer cannot ask the human: DSH refuses human interaction to any agent another agent owns, so \`ask_user_question\` is not available to them. A peer that needs a decision only the human can make raises it with \`action: "raise-question"\` and stops. While a question is open the run is parked — the review, the final review, and settlement of that task are all refused. Put the question to the human yourself, then answer it with \`action: "answer-question"\`; ORC delivers the answer to the peer that raised it.`
 
 /** Every action the tool accepts. */
 const ACTIONS = [
@@ -65,6 +67,8 @@ const ACTIONS = [
   'create-peer',
   'start-task',
   'settle-task',
+  'raise-question',
+  'answer-question',
   'dispatch',
   'fix',
   'dismiss',
@@ -111,6 +115,18 @@ const ORC_PARAMETERS = {
   peerName: { type: 'string', description: 'create-peer: the peer name.' },
   peerId: { type: 'string', description: 'start-task: the peer the task is assigned to.' },
   taskId: { type: 'string', description: 'start-task/settle-task: the task identifier.' },
+  questionId: {
+    type: 'string',
+    description: 'answer-question: the id of the question to answer, as reported by status.',
+  },
+  question: {
+    type: 'string',
+    description: 'raise-question: the decision you need from the human before you can continue.',
+  },
+  answer: {
+    type: 'string',
+    description: 'answer-question: the human decision, delivered to the peer that raised the question.',
+  },
   findingId: { type: 'string', description: 'fix/dismiss: the finding identifier.' },
   stage: {
     type: 'string',
@@ -138,6 +154,7 @@ const ORC_OUTPUT_SCHEMA = {
     peers: { type: 'array', items: { type: 'string' } },
     tasks: { type: 'array', items: { type: 'string' } },
     findings: { type: 'array', items: { type: 'string' } },
+    questions: { type: 'array', items: { type: 'string' } },
     taskGate: { type: 'string' },
     finalReview: { type: 'string' },
     finalAudit: { type: 'string' },
@@ -182,6 +199,7 @@ function valueOf(action: OrcAction, state: OrcState, risk: RiskDecision, message
     peers: [...state.peers],
     tasks: state.tasks.map(task => `${task.id}:${task.status}`),
     findings: state.findings.map(finding => `${finding.id}:${finding.severity}:${finding.status}`),
+    questions: state.questions.map(question => `${question.id}:${question.status}`),
     taskGate: state.taskGate,
     finalReview: state.finalReview,
     finalAudit: state.finalAudit,
@@ -312,6 +330,17 @@ async function runAction(
       const peer = peerForTask(caller, state, taskId)
       const next = await service.settleTask(peer, taskId)
       return valueOf(args.action, next, risk, `task ${taskId} settled`)
+    }
+    case 'raise-question': {
+      const taskId = required(args.taskId, 'taskId')
+      const peer = peerForTask(caller, state, taskId)
+      const next = await service.raiseQuestion(peer, taskId, required(args.question, 'question'))
+      return valueOf(args.action, next, risk, `question raised on task ${taskId}`)
+    }
+    case 'answer-question': {
+      const questionId = required(args.questionId, 'questionId')
+      const next = await service.answerQuestion(caller, questionId, required(args.answer, 'answer'))
+      return valueOf(args.action, next, risk, `question ${questionId} answered`)
     }
     case 'dispatch': {
       const stage = required(args.stage, 'stage')
