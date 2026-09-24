@@ -15,9 +15,10 @@
  *   its own.
  *
  * The fixture digest is SHA-256 over the canonical projection
- * `{ id, scope, code, expected }`, so a changed code sample or expectation
- * invalidates the manifest. `--write-manifest` regenerates those digests from
- * the fixtures; the manifest is never hand-edited.
+ * `{ id, scope, code, expected, candidates }`, so a changed code sample,
+ * expectation, or candidate list invalidates the manifest. `--write-manifest`
+ * regenerates those digests from the fixtures; the manifest is never
+ * hand-edited.
  *
  * A recorded responses file is JSON mapping fixture id to either an array of
  * finding ids or raw model text containing one `FINDING: <id>` line per
@@ -26,14 +27,20 @@
  * A live invocation is spawned once per fixture with the fixture prompt on
  * stdin and its stdout parsed the same way. The prompt is deterministic and
  * built from the fixture alone: it carries the scope and the code, and it names
- * that fixture's candidate finding ids — its `expected` list — as the exact
- * vocabulary the scorer accepts, so a run measures whether the route found the
- * seeded bug rather than whether it guessed the identifier string. The
- * candidates are never annotated with which are present, so the route must
- * still decide that from the code; a clean fixture gets an explicitly empty
- * candidate list and is told that an empty report is a valid answer. The argv
- * is explicit and never shell-interpolated, and there are two equivalent ways
- * to write one:
+ * that fixture's `candidates` — the exact vocabulary the scorer accepts — so a
+ * run measures whether the route found the seeded bug rather than whether it
+ * guessed the identifier string.
+ *
+ * Every fixture's candidate list mixes ids that ARE present in that code
+ * (exactly its `expected` set) with distractor ids that are plausible for the
+ * fixture's scope but genuinely absent from it. The candidates are never
+ * annotated with which are which, so echoing the whole vocabulary scores
+ * detection 1.0 only by also reporting every distractor, which drives
+ * `falsePositiveScore` far above the 0.2 admissibility floor. A clean fixture
+ * carries an `expected` of `[]` and a non-empty candidate list, so it is a
+ * control with the same vocabulary as its seeded sibling: reporting nothing is
+ * the only way to keep its false positives at zero. The argv is explicit and
+ * never shell-interpolated, and there are two equivalent ways to write one:
  *
  * ```
  * --command codex --arg exec --arg --json --arg -
@@ -125,7 +132,13 @@ function commandArgv(args) {
 }
 
 const canonicalFixture = fixture =>
-  JSON.stringify({ id: fixture.id, scope: fixture.scope, code: fixture.code, expected: fixture.expected })
+  JSON.stringify({
+    id: fixture.id,
+    scope: fixture.scope,
+    code: fixture.code,
+    expected: fixture.expected,
+    candidates: fixture.candidates,
+  })
 
 const digest = fixture => createHash('sha256').update(canonicalFixture(fixture)).digest('hex')
 
@@ -156,6 +169,18 @@ function verify(fixtures, manifest) {
     if (byId.has(fixture.id)) problems.push(`fixtures.json repeats fixture id "${fixture.id}"`)
     byId.set(fixture.id, fixture)
     if (!SCOPE.includes(fixture.scope)) problems.push(`fixture "${fixture.id}" has unknown scope "${fixture.scope}"`)
+    if (!Array.isArray(fixture.candidates) || fixture.candidates.length === 0) {
+      problems.push(`fixture "${fixture.id}" must offer a non-empty candidates list`)
+    } else {
+      if (new Set(fixture.candidates).size !== fixture.candidates.length) {
+        problems.push(`fixture "${fixture.id}" repeats a candidate id`)
+      }
+      for (const id of fixture.expected) {
+        if (!fixture.candidates.includes(id)) {
+          problems.push(`fixture "${fixture.id}" expected finding "${id}" is missing from its candidates`)
+        }
+      }
+    }
   }
   const recorded = new Set()
   for (const entry of manifest.fixtures) {
@@ -175,6 +200,9 @@ function verify(fixtures, manifest) {
     if (JSON.stringify(entry.expected) !== JSON.stringify(fixture.expected)) {
       problems.push(`fixture "${entry.id}" expected findings mismatch`)
     }
+    if (JSON.stringify(entry.candidates) !== JSON.stringify(fixture.candidates)) {
+      problems.push(`fixture "${entry.id}" candidates mismatch`)
+    }
   }
   for (const fixture of fixtures) {
     if (!recorded.has(fixture.id)) problems.push(`fixture "${fixture.id}" is missing from the manifest`)
@@ -190,6 +218,7 @@ async function writeManifest(fixtures) {
       scope: fixture.scope,
       sha256: digest(fixture),
       expected: fixture.expected,
+      candidates: fixture.candidates,
     })),
   }
   await writeFile(MANIFEST_PATH, `${JSON.stringify(body, null, 2)}\n`)
@@ -206,29 +235,25 @@ function findingsOf(output) {
  * The deterministic prompt for one fixture.
  *
  * It states the report syntax, the scope, and the code, and it presents the
- * fixture's own candidate finding ids — its `expected` list, the exact
- * vocabulary the scorer accepts — so a run measures whether the route found the
- * seeded bug rather than whether it guessed the identifier string. The
- * candidates are never annotated with which are present: the route still has to
- * decide that from the code, is told to report a candidate only when it
- * actually finds it, and is told an empty report is valid. A clean fixture's
- * candidate list is explicitly empty rather than absent, so reporting nothing
- * is an expected answer and not an omission.
+ * fixture's own `candidates` — the exact vocabulary the scorer accepts — so a
+ * run measures whether the route found the seeded bug rather than whether it
+ * guessed the identifier string. Each list mixes the ids that are present with
+ * distractor ids that are plausible for the scope but absent from the code, and
+ * the prompt never says which are which: the route still has to decide that
+ * from the code, is told to report a candidate only when it actually finds it,
+ * and is told an empty report is valid. A clean fixture's `expected` is empty
+ * but its candidate list is not, so it presents distractors exactly like every
+ * other fixture and a report of any of them is a false positive.
  */
 function promptFor(fixture) {
-  const candidates = fixture.expected.length === 0
-    ? ['Candidate finding ids for this fixture: none.']
-    : [
-        'Candidate finding ids for this fixture (report only ids from this list):',
-        ...fixture.expected.map(id => `- ${id}`),
-      ]
   return [
     'Review the code below for the seeded known bugs.',
     'Report each finding on its own line exactly as: FINDING: <finding-id>',
     '',
-    ...candidates,
+    'Candidate finding ids for this fixture (report only ids from this list):',
+    ...fixture.candidates.map(id => `- ${id}`),
     '',
-    'Report a candidate id only if the code actually contains that bug. Do not report an id whose bug is absent, and do not report an id that is not on the list. If none of the candidates are present, report nothing — an empty report is a valid and expected answer.',
+    'Some of the candidate ids name bugs the code contains and some do not. Report a candidate id only if the code actually contains that bug. Do not report an id whose bug is absent, and do not report an id that is not on the list. If the code contains no candidate bug, report nothing — an empty report is a valid and expected answer.',
     '',
     `Scope: ${fixture.scope}`,
     'Code:',

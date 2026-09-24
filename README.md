@@ -154,14 +154,22 @@ manifest keylessly — no model, no network, no credential:
 node scripts/benchmark.mjs --verify-fixtures
 ```
 
-**What the score measures.** Each fixture's prompt names that fixture's
-candidate finding ids — the exact vocabulary the scorer accepts — so a run
-measures whether the selected route found the seeded bugs when it was handed
-that vocabulary, and whether it kept an empty report on the fixtures that have
-no seeded bug. It is **not** a free-form review-accuracy score: a correct
-finding reported under an identifier outside the vocabulary is not credited, so
-the number says nothing about how a route names, ranks, or explains issues on
-real code.
+**What the score measures.** Each fixture's prompt offers that fixture's
+candidate finding ids — the exact vocabulary the scorer accepts — and every list
+mixes ids whose bugs are present in the code (exactly the fixture's seeded
+`expected` set) with plausible distractor ids that are absent from it. A clean
+fixture is not announced as candidate-free: it offers a non-empty list of
+distractors too. The score is therefore a **recognition-with-distractors**
+measure: it says whether the selected route reported the seeded bug(s) that are
+present *and* rejected the absent candidates offered alongside them, which is
+why echoing the whole vocabulary now produces false positives instead of a
+perfect score.
+
+It is **not** a free-form review-accuracy score. A correct finding reported
+under an identifier outside the offered vocabulary is not credited, so the
+number says nothing about how a route names, ranks, or explains issues on real
+code, and nothing about whether it can surface a real bug the suite did not
+seed. Read it as a floor on discrimination, not as a quality ranking.
 
 **A fresh install ships no evidence records.** `benchmarks/evidence/` does not
 exist until you generate a record, so the fail-closed evidence snapshot excludes

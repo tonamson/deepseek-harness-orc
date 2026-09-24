@@ -14,8 +14,11 @@
  *   stdin, and refuses to write a record whose `backendVersion` would be empty
  *   (R22: an empty live version can never be admissible evidence);
  * - the prompt it sends names that fixture's candidate finding ids as the only
- *   reportable vocabulary and never marks which are present, while a clean
- *   fixture is told an empty report is expected — and the score is unchanged.
+ *   reportable vocabulary and never marks which are present — the candidates
+ *   mix the seeded ids with plausible distractors, and a clean fixture offers a
+ *   non-empty candidate list of its own — so a route that echoes the whole
+ *   vocabulary is caught by the false-positive dimension instead of clearing
+ *   both admissibility floors;
  */
 
 import { execFileSync } from 'node:child_process'
@@ -34,6 +37,8 @@ const RUNNER = join(ROOT, 'scripts', 'benchmark.mjs')
 const ECHO = join(ROOT, 'tests', 'fixtures', 'benchmark-echo.mjs')
 /** The fake review CLI that records each fixture prompt it receives. */
 const CAPTURE = join(ROOT, 'tests', 'fixtures', 'benchmark-prompt.mjs')
+/** The fake review CLI that echoes every candidate id its fixture prompt offers. */
+const ECHO_CANDIDATES = join(ROOT, 'tests', 'fixtures', 'benchmark-echo-candidates.mjs')
 
 /** One seeded or clean fixture as `benchmarks/fixtures.json` ships it. */
 interface Fixture {
@@ -41,13 +46,19 @@ interface Fixture {
   scope: string
   code: string
   expected: string[]
+  candidates: string[]
 }
 
 /** The shipped fixture set, in the order the runner scores it. */
 const FIXTURES = JSON.parse(readFileSync(join(ROOT, 'benchmarks', 'fixtures.json'), 'utf8')) as Fixture[]
 
-/** Every expected finding id across the suite, for cross-fixture leak checks. */
-const SEEDED_IDS = FIXTURES.flatMap(fixture => fixture.expected)
+/** The candidate ids one fixture prompt offered, read back off its `- <id>` lines. */
+function offeredCandidates(prompt: string): string[] {
+  return prompt
+    .split('\n')
+    .filter(line => line.startsWith('- '))
+    .map(line => line.slice(2).trim())
+}
 
 /** One owned temp directory, removed after the suite. */
 const owned: string[] = []
@@ -207,7 +218,7 @@ describe('benchmark runner live invocation', () => {
 })
 
 describe('benchmark fixture prompt', () => {
-  it('names each fixture its candidate ids as the only reportable vocabulary', () => {
+  it('offers every fixture exactly its candidate vocabulary, expected included', () => {
     const prompts = capturedPrompts()
     expect(prompts).toHaveLength(FIXTURES.length)
 
@@ -218,27 +229,41 @@ describe('benchmark fixture prompt', () => {
       expect(prompt).toContain(`Scope: ${fixture.scope}`)
       expect(prompt).toContain(fixture.code)
 
-      if (fixture.expected.length === 0) continue
-      // The expected ids are exactly the candidates this prompt offers.
-      for (const id of fixture.expected) expect(prompt).toContain(id)
-      // No other fixture's ids leak into this one's vocabulary.
-      for (const id of SEEDED_IDS) {
-        if (!fixture.expected.includes(id)) expect(prompt).not.toContain(id)
-      }
+      // The prompt offers every candidate this fixture ships, and nothing else:
+      // a fixture that dropped or added a candidate would fail here.
+      expect(offeredCandidates(prompt)).toEqual(fixture.candidates)
+      for (const id of fixture.candidates) expect(prompt).toContain(id)
     }
   })
 
-  it('tells a clean fixture an empty report is expected, and fabricates no candidate', () => {
+  it('keeps every fixture\'s expected set inside its candidate list, with absent distractors', () => {
+    for (const fixture of FIXTURES) {
+      // The scorer credits an id only if it was offered, so an expected id that
+      // is not a candidate could never be detected.
+      for (const id of fixture.expected) expect(fixture.candidates).toContain(id)
+      // Guessing must not be viable: every fixture offers several candidates,
+      // and at least one offered candidate is never the correct answer.
+      expect(fixture.candidates.length).toBeGreaterThanOrEqual(3)
+      expect(fixture.candidates.length).toBeGreaterThan(fixture.expected.length)
+      expect(new Set(fixture.candidates).size).toBe(fixture.candidates.length)
+    }
+  })
+
+  it('gives a clean fixture a non-empty candidate list instead of a "none" announcement', () => {
     const prompts = capturedPrompts()
     const clean = FIXTURES.filter(fixture => fixture.expected.length === 0)
     expect(clean.length).toBeGreaterThan(0)
 
     for (const fixture of clean) {
+      // A clean fixture is a control with the same shape as its seeded sibling,
+      // so it tests restraint rather than being handed an empty vocabulary.
+      expect(fixture.candidates.length).toBeGreaterThan(0)
       const prompt = prompts[FIXTURES.indexOf(fixture)] ?? ''
-      expect(prompt).toContain('Candidate finding ids for this fixture: none.')
+      expect(offeredCandidates(prompt)).toEqual(fixture.candidates)
       expect(prompt).toMatch(/report nothing/)
-      // A clean prompt must not offer a candidate borrowed from a seeded fixture.
-      for (const id of SEEDED_IDS) expect(prompt).not.toContain(id)
+      // The old announcement is gone, so no fixture is told its list is empty.
+      expect(prompt).not.toContain('Candidate finding ids for this fixture: none.')
+      expect(prompt).not.toMatch(/\bnone\b/i)
     }
   })
 
@@ -258,5 +283,24 @@ describe('benchmark fixture prompt', () => {
       expect(scored.detected).toEqual(fixture?.expected)
       expect(scored.falsePositives).toEqual([])
     }
+  })
+
+  it('scores a route that echoes every offered candidate above the false-positive floor', () => {
+    // The exploit R31 closes: a route that never reads the code and reports the
+    // whole vocabulary the prompt offers used to score 1.0 detection with 0.0
+    // false positives, clearing both floors at src/domain/routing.ts:98-99.
+    // With distractors in every list it must now exceed the 0.2 floor.
+    const result = run(...ROUTE, '--command', process.execPath, '--arg', ECHO_CANDIDATES)
+    expect(result.status).toBe(0)
+
+    const record = result.record as { detectionScore: number; falsePositiveScore: number }
+    // Detection is still perfect — every expected id was offered and echoed.
+    expect(record.detectionScore).toBe(1)
+    // ...but echoing the distractors is now a false positive on every fixture.
+    expect(record.falsePositiveScore).toBeGreaterThan(0.2)
+
+    // The old exploit cleared both admissibility floors; it no longer does.
+    const floors = { detection: 0.8, falsePositive: 0.2 }
+    expect(record.detectionScore >= floors.detection && record.falsePositiveScore <= floors.falsePositive).toBe(false)
   })
 })

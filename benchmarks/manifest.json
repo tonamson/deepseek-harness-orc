@@ -4,46 +4,82 @@
     {
       "id": "fin-round-up",
       "scope": "financial",
-      "sha256": "2327495607edad42d53a810ce49ae8ee0ebf951314917c074e598992f7249a81",
+      "sha256": "6f2e61dfc2522afcea75da1c45ffdcaeaa02331a43b22698c4249d6dad30ffb3",
       "expected": [
         "rounding-overpays"
+      ],
+      "candidates": [
+        "rounding-overpays",
+        "duplicate-credit",
+        "currency-mismatch",
+        "unbounded-refund"
       ]
     },
     {
       "id": "fin-double-settle",
       "scope": "financial",
-      "sha256": "c142b1f5889320752d170ca6c8e45d7aac8b862137b5775bf3693a4abf0f7a76",
+      "sha256": "54e96f059065c99ca8ee1f2dcf68b8eb6f2c0b96217fcaf0f72d5dc27a44546a",
       "expected": [
         "duplicate-credit"
+      ],
+      "candidates": [
+        "duplicate-credit",
+        "rounding-overpays",
+        "currency-mismatch",
+        "unbounded-refund"
       ]
     },
     {
       "id": "sec-auth-bypass",
       "scope": "security",
-      "sha256": "0f806ecbd204e58003f9a8b4ac417e11a49737700a7207f9bfa1f58be3ade58b",
+      "sha256": "6963149d7b881cdde42c072a7ee99753bd332e0f83308765271abff839ef99f3",
       "expected": [
         "authorization-bypass"
+      ],
+      "candidates": [
+        "authorization-bypass",
+        "secret-in-log",
+        "sql-injection",
+        "missing-rate-limit"
       ]
     },
     {
       "id": "sec-secret-log",
       "scope": "security",
-      "sha256": "1a6a6b12df6e12aa4560b4af99684c82d382e35a63bf2fb5236025f197b67b1a",
+      "sha256": "3861b9862411e7dad36ada0ddc8b64eb40c8962a9c92e927986ca8322db7de8d",
       "expected": [
         "secret-in-log"
+      ],
+      "candidates": [
+        "secret-in-log",
+        "authorization-bypass",
+        "sql-injection",
+        "missing-rate-limit"
       ]
     },
     {
       "id": "clean-round",
       "scope": "financial",
-      "sha256": "014e7f81d7f59136a75f6bf6ad53a0ceeb80d38c9e37a804ea942b330c36dc55",
-      "expected": []
+      "sha256": "3c58ad5558b02ef9b3c9f902a637491ec4e8330ae4ba58d6f8ca017bc11b0da6",
+      "expected": [],
+      "candidates": [
+        "rounding-overpays",
+        "duplicate-credit",
+        "currency-mismatch",
+        "unbounded-refund"
+      ]
     },
     {
       "id": "clean-auth",
       "scope": "security",
-      "sha256": "2692c0ac7c54b4debcb3dae2af8df02630d8e8178141288822710af15c1dabbe",
-      "expected": []
+      "sha256": "3ebd301abe6bf05c82cac167e7541b81dc38591474de25d43617428cbacc39ae",
+      "expected": [],
+      "candidates": [
+        "authorization-bypass",
+        "secret-in-log",
+        "sql-injection",
+        "missing-rate-limit"
+      ]
     }
   ]
 }
