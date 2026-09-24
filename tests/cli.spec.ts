@@ -109,11 +109,50 @@ it.each([
   expect(() => parseCliVersion(raw, 'claude')).toThrow(/version/)
 })
 
-it('leaves the Codex contract product-prefixed and suffix-free', () => {
+it('keeps the Codex contract product-prefixed and suffix-free', () => {
   expect(parseCliVersion('codex 0.157.0', 'codex').supported).toBe(true)
   expect(() => parseCliVersion('0.157.0', 'codex')).toThrow(/version/)
   expect(() => parseCliVersion('0.157.0 (Claude Code)', 'codex')).toThrow(/version/)
   expect(() => parseCliVersion('0.157.0 (Codex)', 'codex')).toThrow(/version/)
+})
+
+/* R36: real `codex --version` prints `codex-cli <semver>`. */
+
+it.each([
+  ['codex-cli 0.156.1', true],
+  ['codex-cli 0.157.0', true],
+  ['codex-cli 0.156.0', false],
+  ['codex-cli 0.99.0', false],
+  ['codex-cli 0.1000.0', true],
+  ['codex-cli 0.157.0-rc.1', true],
+  ['codex-cli 0.156.1-beta.2', false],
+] as const)('accepts the real Codex CLI version shape %s', (raw, supported) => {
+  expect(parseCliVersion(raw, 'codex').supported).toBe(supported)
+})
+
+it('still accepts the plan-pinned product-prefixed Codex form', () => {
+  expect(parseCliVersion('codex 0.156.1', 'codex')).toMatchObject({
+    version: '0.156.1',
+    prerelease: '',
+    supported: true,
+  })
+  expect(parseCliVersion('codex 0.156.0', 'codex').supported).toBe(false)
+})
+
+it.each([
+  'codex-cli 0.156.1 extra',
+  'codex-cli0.156.1',
+  'codex-cli  0.156.1',
+  'Codex-cli 0.156.1',
+  'codex-cli v0.156.1',
+  'codex-cli 0.156.1 (Codex)',
+  'xcodex-cli 0.156.1',
+] as const)('rejects a near-miss Codex product prefix %s', raw => {
+  expect(() => parseCliVersion(raw, 'codex')).toThrow(/version/)
+})
+
+it('rejects the real Codex shape for the Claude product', () => {
+  expect(() => parseCliVersion('codex-cli 0.156.1', 'claude')).toThrow(/version/)
 })
 
 it('strips ANSI from the diagnostic and reports invalid-version', () => {
@@ -610,7 +649,7 @@ it('invalidates a green probe when the parsed CLI version changes', async () => 
   const subprocess = fakeSubprocess({ selected: 'codex', mode: 'ok' })
   const adapter = new CliAdapter(subprocess)
   await adapter.probe(codexRoute, undefined, signal())
-  subprocess.setEnv({ ORC_FAKE_VERSION: 'codex 0.157.0' })
+  subprocess.setEnv({ ORC_FAKE_VERSION: 'codex-cli 0.157.0' })
   const dispatched = execRuns(subprocess)
   await expect(adapter.run(codexRoute, undefined, 'review', CWD, signal()))
     .rejects.toMatchObject({ code: 'unsupported-protocol' })

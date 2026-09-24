@@ -132,12 +132,25 @@ export interface CliProbe {
 }
 
 /**
- * The plan-pinned shape: a full product-prefixed semantic version with an
- * optional documented prerelease. `codex --version` prints exactly this, and
- * the plan pins `claude <semver>` as the accepted Claude form too. A leading
- * `v`, trailing text, ANSI noise, and non-numeric components are all malformed.
+ * The product-prefixed shape: a full semantic version with an optional
+ * documented prerelease, preceded by one of the exact product prefixes below.
+ * The plan pins `codex <semver>` and `claude <semver>`; the installed Codex CLI
+ * actually prints `codex-cli <semver>` (R36). A leading `v`, trailing text,
+ * ANSI noise, and non-numeric components are all malformed.
  */
-const VERSION_PATTERN = /^(codex|claude) (\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z][0-9A-Za-z.-]*))?$/
+const VERSION_PATTERN = /^(codex-cli|codex|claude) (\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z][0-9A-Za-z.-]*))?$/
+
+/**
+ * The exact product tokens each CLI's `--version` may print. This is a closed
+ * set of literals, never a loose "any prefix followed by a version": Codex
+ * accepts its plan-pinned `codex` token and the real `codex-cli` token (R36),
+ * while Claude accepts only `claude` (its real bare form is matched
+ * separately). The regex above only ever offers these tokens as candidates.
+ */
+const VERSION_PRODUCTS: Readonly<Record<CliName, readonly string[]>> = {
+  codex: ['codex', 'codex-cli'],
+  claude: ['claude'],
+}
 
 /**
  * The real-world Claude Code shape: a bare semantic version, optionally
@@ -206,14 +219,16 @@ type VersionComponents = readonly [major: string, minor: string, patch: string, 
 /**
  * Match the accepted `--version` shapes for the selected CLI.
  *
- * `codex` accepts only the plan-pinned `codex <semver>` form. `claude` accepts
- * that form and the real-world bare `<semver>` optionally followed by the exact
- * ` (Claude Code)` suffix (R21). The suffix is a literal, never a loose
- * pattern, so arbitrary trailing text stays malformed.
+ * `codex` accepts the plan-pinned `codex <semver>` form and the real
+ * `codex-cli <semver>` form the installed CLI prints (R36). `claude` accepts
+ * the plan-pinned `claude <semver>` form and the real-world bare `<semver>`
+ * optionally followed by the exact ` (Claude Code)` suffix (R21). The accepted
+ * product tokens and the suffix are literals, never loose patterns, so an
+ * arbitrary prefix or trailing text stays malformed.
  */
 function matchVersion(text: string, cli: CliName): VersionComponents | null {
   const prefixed = VERSION_PATTERN.exec(text)
-  if (prefixed !== null && prefixed[1] === cli) {
+  if (prefixed !== null && VERSION_PRODUCTS[cli].includes(prefixed[1])) {
     return [prefixed[2], prefixed[3], prefixed[4], prefixed[5] ?? '']
   }
   if (cli === 'claude') {
@@ -226,11 +241,12 @@ function matchVersion(text: string, cli: CliName): VersionComponents | null {
 /**
  * Parse one `--version` line for the selected CLI.
  *
- * The product must be the selected CLI. `codex` accepts only the plan-pinned
- * `codex <semver>` form; `claude` accepts that form and the real-world bare
- * `<semver>` optionally followed by the exact ` (Claude Code)` suffix. The
- * verdict compares numeric components, so a lexicographically larger `0.99.0`
- * is still below `0.156.1`.
+ * The product must be the selected CLI. `codex` accepts the plan-pinned
+ * `codex <semver>` form and the real `codex-cli <semver>` form (R36); `claude`
+ * accepts `claude <semver>` and the real-world bare `<semver>` optionally
+ * followed by the exact ` (Claude Code)` suffix (R21). The verdict compares
+ * numeric components, so a lexicographically larger `0.99.0` is still below
+ * `0.156.1`.
  *
  * @throws {CliError} `invalid-version` when the output is malformed.
  */

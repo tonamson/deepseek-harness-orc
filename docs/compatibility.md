@@ -219,10 +219,10 @@ Rechecked 2026-09-23, before writing the probe commands, against:
 
 | Probe | Documented shape | Verdict |
 |---|---|---|
-| `codex --version` | clap `#[clap(version, bin_name = "codex")]` prints `codex <semver>` on stdout (`codex-rs/cli/src/main.rs`). | **Matches** the plan's `codex 0.156.1` shape. |
+| `codex --version` | clap `#[clap(version, …)]` prints `<bin name> <semver>` on stdout (`codex-rs/cli/src/main.rs`); the installed binary's name is `codex-cli`, so the real output is `codex-cli <semver>`. Independently observed on the installed CLI: `codex-cli 0.156.1`. | **Does not match** the plan's `codex 0.156.1` shape; resolved by **R36** (parser widening, not an argv change) — see below. |
 | `codex login status` | `LoginSubcommand::Status` → `run_login_status` writes the verdict with `eprintln!` to **stderr** and exits `0` when signed in, `1` when not (`codex-rs/cli/src/login.rs`). Signed-in lines include `Logged in using ChatGPT` and `Logged in using an API key - sk-proj-***ABCDE`; signed-out is `Not logged in`. | Command **matches**; the stream is stderr, not stdout (recorded below). |
 | `codex exec --json` | JSONL events `#[serde(tag = "type")]`: `thread.started`, `turn.started`, `turn.completed` (with `usage`), `turn.failed` (with `error.message`), `item.started`, `item.updated`, `item.completed`, `error` (`exec_events.rs`). `ThreadItem` is `{ id, #[serde(flatten)] details }` with `ThreadItemDetails` tagged `rename_all = "snake_case"`, so an agent answer is `{"type":"item.completed","item":{"id":…,"type":"agent_message","text":…}}`. | **Matches**; the fixtures emit exactly this. Non-fatal warnings arrive as `item.completed` items of `type: "error"` (`collect_warning`), not as top-level `error` events, so only `turn.failed`/`error` are fatal. |
-| `claude --version` | The CLI reference documents a version flag, but the fetched page truncates that row; the exact stdout could not be confirmed from the official page. Independently observed output is the bare `<semver> (Claude Code)` — for example `2.1.119 (Claude Code)` — with no product prefix. | Command **matches** the plan. By **R21** the parser accepts both the plan-pinned `claude <semver>` and the real bare `<semver>` (optionally with the exact ` (Claude Code)` suffix); see below. |
+| `claude --version` | The CLI reference documents a version flag, but the fetched page truncates that row; the exact stdout could not be confirmed from the official page. Independently observed output is the bare `<semver> (Claude Code)` — for example `2.1.119 (Claude Code)`, re-observed `2.1.281 (Claude Code)` on the installed CLI — with no product prefix. | Command **matches** the plan. By **R21** the parser accepts both the plan-pinned `claude <semver>` and the real bare `<semver>` (optionally with the exact ` (Claude Code)` suffix); see below. |
 | `claude auth status` | "Show authentication status as JSON. Use `--text` for human-readable output. Exits with code 0 if logged in, 1 if not" (`cli-reference`). The payload is camelCase — `loggedIn`, `authMethod`, `apiProvider`, `email`, `orgId`, `orgName`, `subscriptionType` — and signed out is exit 1 **with valid JSON** (`{"loggedIn":false,"authMethod":"none","apiProvider":"firstParty"}`). | Command **matches**; the fixtures emit this payload, and the adapter reads `loggedIn` rather than treating exit 1 as unreadable output. |
 | `claude -p <prompt> --output-format json --model <m> --effort <e>` | `--print`/`-p` runs non-interactively; `--output-format` accepts `text`, `json`, `stream-json`; with `json` the payload is "structured JSON with result, session ID, and metadata" and the text is in the `result` field (`headless`). `--effort` accepts `low`, `medium`, `high`, `xhigh`, `max`, `ultracode`; `--model` sets the model (`cli-reference`). | **Matches** the plan's argv, including `--effort high`. |
 | Claude result completion status | The Agent SDK checks `message.subtype == "success"` for a successful completion (`agent-sdk/python`, `receive_response`), and `ResultMessage` carries `subtype`, `is_error`, and `result`. The official `anthropics/claude-code-action` commit *"fix(sdk): fail step when result has is_error:true despite success subtype"* confirms `is_error: true` can accompany `subtype: "success"`. | The adapter accepts `result` only when `subtype === 'success'` **and** `is_error !== true`, and rejects the contradictory pair as `invalid-result`. |
@@ -231,8 +231,8 @@ Rechecked 2026-09-23, before writing the probe commands, against:
 
 **R11 keeps the plan's exact argv arrays.** The two pinned `*Argv` assertions
 were rechecked against the documented flags above and hold byte-for-byte, so no
-assertion was changed. One documented output shape did conflict with the Step 1
-version table and is now resolved by ruling:
+assertion was changed. Two documented output shapes did conflict with the Step 1
+version table and are now resolved by ruling:
 
 1. **`claude --version` output shape — RESOLVED by R21 (parser widening, not an
    argv change).** The Step 1 table pins the accepted form as the
@@ -257,7 +257,36 @@ version table and is now resolved by ruling:
    `tests/fixtures/fake-claude.mjs` now emits the real
    `<semver> (Claude Code)` shape, so a regression in this contract cannot
    recur untested.
-2. **`codex login status` reports on stderr, not stdout.** The plan pins the
+2. **`codex --version` output shape — RESOLVED by R36 (parser widening, not an
+   argv change).** The Step 1 table pins the accepted form as the
+   product-prefixed `codex 0.156.1`, but the installed Codex CLI prints the
+   **hyphenated** product prefix `codex-cli` — real output
+   `codex-cli 0.156.1` (codex 0.156.1, independently observed on the installed
+   CLI) — with no `codex ` prefix. Under the pinned parser a genuine Codex host
+   threw `invalid-version`, so `CliAdapter.probe` → `inspect` →
+   `parseCliVersion` failed on every real machine, `catalog` skipped the route,
+   and no Codex entry was ever advertised. R36 directed a widening: for `codex`,
+   `parseCliVersion` now accepts **both** the plan-pinned
+   `codex <semver>[-prerelease]` form and the real
+   `codex-cli <semver>[-prerelease]` form. The accepted prefixes are an
+   **explicit, closed set** — `src/host/cli.ts:141` (the anchored
+   `VERSION_PATTERN`) offers only `codex-cli`, `codex`, and `claude` as product
+   tokens, and `src/host/cli.ts:150` (`VERSION_PRODUCTS`) admits `codex-cli` and
+   `codex` for Codex and only `claude` for Claude — never a loose "any prefix
+   followed by a version". This is a parser widening only. It leaves the pinned
+   argv contract intact — `codexArgv` and `claudeArgv` are byte-for-byte
+   unchanged (R11) — and it leaves the numeric component-by-component comparison
+   (`src/host/cli.ts:189-201`; no string/locale compare, no `parseFloat`), the
+   unchanged `0.156.1` floor (`0.156.1` supported, `0.156.0` refused,
+   `0.157.0` supported), and the malformed-input rejections unchanged:
+   `v0.156.1 garbage`, ANSI-wrapped `unknown`, `codex 1000.bad.1`, and every
+   near-miss such as `codex-cli 0.156.1 extra`, `codex-cli0.156.1`, or
+   `codex-cli v0.156.1` still throw `/version/`. The R21 Claude contract is
+   unchanged. The fixture `tests/fixtures/fake-codex.mjs:31-38` now emits the
+   real `codex-cli <semver>` shape (default `codex-cli 0.156.1`), so a
+   regression in this contract cannot recur untested; `tests/cli.spec.ts:119-155`
+   covers the accepted, refused, and malformed Codex shapes.
+3. **`codex login status` reports on stderr, not stdout.** The plan pins the
    command but no stream, so this is not a contradicted assertion; it is an
    implementation constraint now recorded. The adapter reads the verdict from
    stderr with a stdout fallback, and the pinned `stderr: { maxBytes: 16_384 }`

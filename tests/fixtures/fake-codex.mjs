@@ -6,8 +6,11 @@
  * exact output shapes the real CLI uses, so the adapter's own parsing and
  * classification run for real instead of being re-implemented in the test:
  *
- * - `codex --version`            → `<bin name> <semver>` on stdout (clap's
- *                                  `version` output; `bin_name = "codex"`).
+ * - `codex --version`            → `codex-cli <semver>` on stdout (clap's
+ *                                  `version` output with
+ *                                  `bin_name = "codex-cli"`; the real CLI
+ *                                  prints `codex-cli 0.156.1`, not the
+ *                                  plan-pinned `codex 0.156.1`).
  * - `codex login status`         → the verdict on **stderr**, exit 0 when
  *                                  signed in and 1 when not
  *                                  (`codex-rs/cli/src/login.rs`).
@@ -24,14 +27,14 @@
 const args = process.argv.slice(2)
 const mode = process.env.ORC_FAKE_MODE ?? 'ok'
 
-/** Version strings per mode, in the shape `codex --version` prints. */
+/** Version strings per mode, in the real shape `codex --version` prints. */
 const VERSIONS = {
-  ok: 'codex 0.156.1',
-  newer: 'codex 0.157.0',
-  'below-floor': 'codex 0.156.0',
+  ok: 'codex-cli 0.156.1',
+  newer: 'codex-cli 0.157.0',
+  'below-floor': 'codex-cli 0.156.0',
   'bad-version': 'v0.156.1 garbage',
   'ansi-version': '\u001b[31munknown\u001b[0m',
-  'numeric-version': 'codex 1000.bad.1',
+  'numeric-version': 'codex-cli 1000.bad.1',
 }
 
 const USAGE = {
