@@ -11,34 +11,34 @@
     "scope": "financial",
     "code": "await credit(user, amount); await credit(user, amount)",
     "expected": ["duplicate-credit"],
-    "candidates": ["duplicate-credit", "rounding-overpays", "currency-mismatch", "unbounded-refund"]
+    "candidates": ["rounding-overpays", "duplicate-credit", "currency-mismatch", "unbounded-refund"]
   },
   {
     "id": "sec-auth-bypass",
     "scope": "security",
     "code": "if (user || user.isAdmin) approve()",
     "expected": ["authorization-bypass"],
-    "candidates": ["authorization-bypass", "secret-in-log", "sql-injection", "missing-rate-limit"]
+    "candidates": ["secret-in-log", "sql-injection", "authorization-bypass", "missing-rate-limit"]
   },
   {
     "id": "sec-secret-log",
     "scope": "security",
     "code": "logger.info({ apiKey })",
     "expected": ["secret-in-log"],
-    "candidates": ["secret-in-log", "authorization-bypass", "sql-injection", "missing-rate-limit"]
+    "candidates": ["authorization-bypass", "sql-injection", "missing-rate-limit", "secret-in-log"]
   },
   {
     "id": "clean-round",
     "scope": "financial",
     "code": "return Math.round(amount * 100) / 100",
     "expected": [],
-    "candidates": ["rounding-overpays", "duplicate-credit", "currency-mismatch", "unbounded-refund"]
+    "candidates": ["currency-mismatch", "rounding-overpays", "duplicate-credit", "unbounded-refund"]
   },
   {
     "id": "clean-auth",
     "scope": "security",
     "code": "if (user?.isAdmin === true) approve()",
     "expected": [],
-    "candidates": ["authorization-bypass", "secret-in-log", "sql-injection", "missing-rate-limit"]
+    "candidates": ["sql-injection", "authorization-bypass", "secret-in-log", "missing-rate-limit"]
   }
 ]

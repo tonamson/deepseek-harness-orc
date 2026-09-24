@@ -267,6 +267,37 @@ describe('benchmark fixture prompt', () => {
     }
   })
 
+  it('does not make the expected id\'s position, or a clean fixture\'s lead, the answer', () => {
+    // R32: the expected id used to sit at index 0 of every seeded fixture, and
+    // each clean fixture led with its sibling's expected id. A route that never
+    // read the code could classify buggy-vs-clean and then report
+    // `candidates[0]` for full detection with no false positives. The position
+    // oracle is now closed: the expected id's index is spread across the seeded
+    // fixtures, and a clean fixture leads with a non-sibling distractor.
+    const seeded = FIXTURES.filter(fixture => fixture.expected.length > 0)
+    expect(seeded.length).toBeGreaterThan(1)
+
+    // The expected id's index is not constant, so no single position answers
+    // every seeded fixture. Re-ordering the lists back to the positional layout
+    // (every expected id at index 0) collapses this set to one value and fails.
+    const expectedIndices = seeded.map(fixture => fixture.candidates.indexOf(fixture.expected[0] ?? ''))
+    for (const index of expectedIndices) expect(index).toBeGreaterThanOrEqual(0)
+    expect(new Set(expectedIndices).size).toBeGreaterThan(1)
+
+    // Every clean fixture leads with a candidate that is NOT the expected id of
+    // any seeded fixture in its own scope, so `candidates[0]` cannot be the
+    // sibling's bug on the control fixtures either.
+    const clean = FIXTURES.filter(fixture => fixture.expected.length === 0)
+    expect(clean.length).toBeGreaterThan(0)
+    for (const fixture of clean) {
+      const siblingExpected = seeded
+        .filter(entry => entry.scope === fixture.scope)
+        .flatMap(entry => entry.expected)
+      expect(siblingExpected.length).toBeGreaterThan(0)
+      expect(siblingExpected).not.toContain(fixture.candidates[0])
+    }
+  })
+
   it('scores a report of the expected ids as full detection and no false positives', () => {
     // The prompt change must not move the score: reporting exactly the expected
     // ids is still 1.0 detection with 0.0 false positives.
