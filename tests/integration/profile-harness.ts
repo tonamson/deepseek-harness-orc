@@ -157,7 +157,10 @@ export function packBundle(): PackedBundle {
   const root = mkdtempSync(join(tmpdir(), 'orc-profile-'))
   const destination = join(root, 'package')
   mkdirSync(destination, { recursive: true })
-  const stdout = execFileSync('npm', ['pack', '--pack-destination', destination, '--json'], {
+  // `--ignore-scripts` skips the manifest's `prepack` build: `ensureBuilt()`
+  // already produced `lib/` from this source, and the second build it triggers
+  // pushes `beforeAll` past Vitest's 10s hookTimeout.
+  const stdout = execFileSync('npm', ['pack', '--ignore-scripts', '--pack-destination', destination, '--json'], {
     cwd: REPO_ROOT,
     encoding: 'utf8',
     env: { ...process.env, npm_config_cache: join(root, 'npm-cache') },
