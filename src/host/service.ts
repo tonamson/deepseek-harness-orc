@@ -818,9 +818,10 @@ export class OrcService {
     return await this.serialize(runId, async () => {
       const session = this.sessionOf(runId)
       const state = this.ports.journal.state(session)
+      this.requireSupervisor(state, supervisor)
       const existing = state.questions.find(candidate => candidate.id === questionId)
       if (existing?.status === 'answered') {
-        await this.deliverAnswer(supervisor, existing)
+        await this.deliverAnswer(state, existing)
         return state
       }
       const next = await this.commit(session, {
@@ -830,7 +831,7 @@ export class OrcService {
         answer,
       })
       const answered = next.questions.find(candidate => candidate.id === questionId)
-      if (answered !== undefined) await this.deliverAnswer(supervisor, answered)
+      if (answered !== undefined) await this.deliverAnswer(next, answered)
       return next
     })
   }
@@ -1735,13 +1736,16 @@ export class OrcService {
   }
 
   /** Send one answered question to the peer it blocks. */
-  private async deliverAnswer(supervisor: Agent, question: QuestionRecord): Promise<void> {
+  private async deliverAnswer(state: OrcState, question: QuestionRecord): Promise<void> {
     const subagents = this.ports.subagents
     if (subagents === undefined) {
       throw new OrcServiceError('the DSH subagent runtime is not mounted; ORC cannot deliver an answer')
     }
+    // DSH admits a steer only from the target's durable direct parent, and a
+    // peer's parent is the run's lead — not the supervisor, who owns the decision.
+    const parent = this.requireChild(this.leadIdOf(state), 'lead')
     await subagents.sendMessage(
-      supervisor,
+      parent,
       SessionId(question.peerId),
       [{ type: 'text', text: `ORC question ${question.id} was answered: ${question.answer ?? ''}` }],
       { signal: this.lifetime.signal },

@@ -1468,8 +1468,26 @@ it('records a peer question and delivers the Supervisor answer to that peer', as
   await service.answerQuestion(ports.supervisor, questionId!, 'postgres')
   expect(ports.subagents.sent).toHaveLength(1)
   expect(ports.subagents.sent[0]?.to).toBe(String(peer.id))
+  // DSH steers only from the target's durable direct parent, and the peer's
+  // parent is the run's lead — so the lead, not the Supervisor, is the sender.
+  expect(ports.subagents.sent[0]?.from).toBe(String(lead.id))
   expect(ports.subagents.sent[0]?.text).toContain('postgres')
   expect(service.state(ports.supervisor).questions[0]).toMatchObject({ status: 'answered', answer: 'postgres' })
+})
+
+it('refuses a non-supervisor answering an already-answered question', async () => {
+  const ports = fakePorts()
+  const service = new OrcService(ports)
+  await toImplement(ports, service)
+  const lead = await service.createLead(ports.supervisor)
+  const peer = await service.createPeer(lead, 'impl')
+  await service.startTask(lead, peer, 'task-1')
+  const raised = await service.raiseQuestion(peer, 'task-1', 'which database?')
+  const questionId = raised.questions[0]!.id
+
+  await service.answerQuestion(ports.supervisor, questionId, 'postgres')
+  await expect(service.answerQuestion(lead, questionId, 'mysql')).rejects.toThrow(/not the run's supervisor/)
+  expect(ports.subagents.sent).toHaveLength(1)
 })
 
 it('raises the same question idempotently for the same peer, task, and text', async () => {
