@@ -465,6 +465,53 @@ describe('route decisions', () => {
     expect(ports.journal.events.at(-1)!.type).toBe('orc/review-result')
   })
 
+  it('does not fail the run when a cancelled route selection aborts a CLI probe', async () => {
+    const ports = fakePorts()
+    const svc = new OrcService(ports)
+    await svc.start(ports.supervisor, HIGH_RISK)
+    // A cold catalog re-probes every allowlisted CLI with a live run, so a user
+    // who cancels that apparent hang aborts the probe. That abort is the
+    // user's cancellation, not a routing failure: blocking the run here would
+    // write the reducer's only terminal event and leave the session dead.
+    const controller = new AbortController()
+    ports.clis.failNextProbe(Object.assign(new Error('cancelled'), { name: 'AbortError' }))
+    controller.abort()
+
+    await expect(svc.dispatch(ports.supervisor, 'spec', 'spec input', controller.signal))
+      .rejects.toThrow(/cancelled/)
+
+    expect(eventNames(ports)).not.toContain('orc/fail')
+    expect(svc.state(ports.supervisor).phase).toBe('spec')
+    // Not terminal: the same stage still runs once a live signal is supplied.
+    await expect(svc.dispatch(ports.supervisor, 'spec', 'spec input', signal))
+      .resolves.toMatchObject({ phase: 'plan' })
+  })
+
+  it('does not fail the run when a cancelled final gate aborts route selection', async () => {
+    const ports = fakePorts()
+    const svc = new OrcService(ports)
+    await toReview(ports, svc)
+    ports.reports.push(cleanReport, cleanReport)
+    await svc.dispatch(ports.supervisor, 'review', 'review task-1', signal)
+    await svc.dispatch(ports.supervisor, 'audit', 'audit task-1', signal)
+    // A policy change forces the catalog to be re-read; cancel that re-read.
+    ports.config = parseConfig({ analysisMode: 'auto', allowed: [codexRoute, claudeRoute] })
+    const controller = new AbortController()
+    ports.clis.failNextProbe(Object.assign(new Error('cancelled'), { name: 'AbortError' }))
+    controller.abort()
+
+    await expect(svc.finalBranchReview(ports.supervisor, 'final branch review', controller.signal))
+      .rejects.toThrow(/cancelled/)
+
+    expect(eventNames(ports)).not.toContain('orc/fail')
+    // The gate's request was never committed, so the run keeps the phase it
+    // held — and the same gate still runs once a live signal is supplied.
+    expect(svc.state(ports.supervisor).phase).toBe('implement')
+    ports.reports.push(cleanReport)
+    await expect(svc.finalBranchReview(ports.supervisor, 'final branch review', signal))
+      .resolves.toMatchObject({ finalReview: 'clean' })
+  })
+
   it('routes the code stage through the configured provider without a lifecycle transition', async () => {
     const ports = fakePorts()
     const svc = new OrcService(ports)

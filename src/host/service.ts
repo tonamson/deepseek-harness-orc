@@ -706,6 +706,9 @@ export class OrcService {
         const catalog = await this.catalogFor(signal)
         decision = selectRoute(stage, risk, config, catalog, this.ports.benchmarks, this.now(), prior)
       } catch (error) {
+        // A cancellation is the user's, not a routing failure: rethrowing it
+        // leaves the lifecycle untouched, exactly as an aborted dispatch does.
+        if (signal.aborted) throw error
         await this.blockOnRoutingFailure(session, runId, stage, error)
         throw error
       }
@@ -849,6 +852,8 @@ export class OrcService {
         const catalog = await this.catalogFor(signal)
         decision = selectRoute(stage, FINAL_GATE_RISK, config, catalog, this.ports.benchmarks, this.now(), prior)
       } catch (error) {
+        // A cancelled gate is not a failed gate; see `dispatch`.
+        if (signal.aborted) throw error
         await this.blockOnRoutingFailure(session, runId, stage, error)
         throw error
       }
@@ -1106,7 +1111,10 @@ export class OrcService {
    * policy without restarting the run.
    *
    * Every other routing failure — a provider discovery fault, an unreadable
-   * evidence record — is an infrastructure failure and blocks.
+   * evidence record — is an infrastructure failure and blocks. A cancellation
+   * never reaches this method: the callers rethrow an aborted signal first, so
+   * a user who cancels a slow catalog re-probe leaves the run exactly as it
+   * was instead of writing the reducer's only terminal event.
    */
   private async blockOnRoutingFailure(
     session: Session,
