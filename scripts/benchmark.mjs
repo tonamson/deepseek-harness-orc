@@ -24,8 +24,16 @@
  * finding.
  *
  * A live invocation is spawned once per fixture with the fixture prompt on
- * stdin and its stdout parsed the same way. The argv is explicit and never
- * shell-interpolated, and there are two equivalent ways to write one:
+ * stdin and its stdout parsed the same way. The prompt is deterministic and
+ * built from the fixture alone: it carries the scope and the code, and it names
+ * that fixture's candidate finding ids — its `expected` list — as the exact
+ * vocabulary the scorer accepts, so a run measures whether the route found the
+ * seeded bug rather than whether it guessed the identifier string. The
+ * candidates are never annotated with which are present, so the route must
+ * still decide that from the code; a clean fixture gets an explicitly empty
+ * candidate list and is told that an empty report is a valid answer. The argv
+ * is explicit and never shell-interpolated, and there are two equivalent ways
+ * to write one:
  *
  * ```
  * --command codex --arg exec --arg --json --arg -
@@ -194,13 +202,39 @@ function findingsOf(output) {
   return output.split('\n').map(line => FINDING_LINE.exec(line)?.[1]).filter(id => id !== undefined)
 }
 
-const promptFor = fixture => [
-  'Review the code below for the seeded known bugs.',
-  'Report each finding on its own line exactly as: FINDING: <finding-id>',
-  `Scope: ${fixture.scope}`,
-  'Code:',
-  fixture.code,
-].join('\n')
+/**
+ * The deterministic prompt for one fixture.
+ *
+ * It states the report syntax, the scope, and the code, and it presents the
+ * fixture's own candidate finding ids — its `expected` list, the exact
+ * vocabulary the scorer accepts — so a run measures whether the route found the
+ * seeded bug rather than whether it guessed the identifier string. The
+ * candidates are never annotated with which are present: the route still has to
+ * decide that from the code, is told to report a candidate only when it
+ * actually finds it, and is told an empty report is valid. A clean fixture's
+ * candidate list is explicitly empty rather than absent, so reporting nothing
+ * is an expected answer and not an omission.
+ */
+function promptFor(fixture) {
+  const candidates = fixture.expected.length === 0
+    ? ['Candidate finding ids for this fixture: none.']
+    : [
+        'Candidate finding ids for this fixture (report only ids from this list):',
+        ...fixture.expected.map(id => `- ${id}`),
+      ]
+  return [
+    'Review the code below for the seeded known bugs.',
+    'Report each finding on its own line exactly as: FINDING: <finding-id>',
+    '',
+    ...candidates,
+    '',
+    'Report a candidate id only if the code actually contains that bug. Do not report an id whose bug is absent, and do not report an id that is not on the list. If none of the candidates are present, report nothing — an empty report is a valid and expected answer.',
+    '',
+    `Scope: ${fixture.scope}`,
+    'Code:',
+    fixture.code,
+  ].join('\n')
+}
 
 /** Spawn the explicitly selected route invocation with no shell and no fallback. */
 function runCommand(argv, input) {

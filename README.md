@@ -154,6 +154,15 @@ manifest keylessly — no model, no network, no credential:
 node scripts/benchmark.mjs --verify-fixtures
 ```
 
+**What the score measures.** Each fixture's prompt names that fixture's
+candidate finding ids — the exact vocabulary the scorer accepts — so a run
+measures whether the selected route found the seeded bugs when it was handed
+that vocabulary, and whether it kept an empty report on the fixtures that have
+no seeded bug. It is **not** a free-form review-accuracy score: a correct
+finding reported under an identifier outside the vocabulary is not credited, so
+the number says nothing about how a route names, ranks, or explains issues on
+real code.
+
 **A fresh install ships no evidence records.** `benchmarks/evidence/` does not
 exist until you generate a record, so the fail-closed evidence snapshot excludes
 every high-risk review and audit: Auto routing refuses those stages with

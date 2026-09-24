@@ -12,7 +12,10 @@
  * - `scripts/benchmark.mjs` spawns the exact argv it is given — `--command`
  *   plus repeated `--arg`, or `--command-json` — with the fixture prompt on
  *   stdin, and refuses to write a record whose `backendVersion` would be empty
- *   (R22: an empty live version can never be admissible evidence).
+ *   (R22: an empty live version can never be admissible evidence);
+ * - the prompt it sends names that fixture's candidate finding ids as the only
+ *   reportable vocabulary and never marks which are present, while a clean
+ *   fixture is told an empty report is expected — and the score is unchanged.
  */
 
 import { execFileSync } from 'node:child_process'
@@ -29,6 +32,22 @@ const ROOT = fileURLToPath(new URL('..', import.meta.url))
 const RUNNER = join(ROOT, 'scripts', 'benchmark.mjs')
 /** The fake review CLI that proves argv and stdin delivery. */
 const ECHO = join(ROOT, 'tests', 'fixtures', 'benchmark-echo.mjs')
+/** The fake review CLI that records each fixture prompt it receives. */
+const CAPTURE = join(ROOT, 'tests', 'fixtures', 'benchmark-prompt.mjs')
+
+/** One seeded or clean fixture as `benchmarks/fixtures.json` ships it. */
+interface Fixture {
+  id: string
+  scope: string
+  code: string
+  expected: string[]
+}
+
+/** The shipped fixture set, in the order the runner scores it. */
+const FIXTURES = JSON.parse(readFileSync(join(ROOT, 'benchmarks', 'fixtures.json'), 'utf8')) as Fixture[]
+
+/** Every expected finding id across the suite, for cross-fixture leak checks. */
+const SEEDED_IDS = FIXTURES.flatMap(fixture => fixture.expected)
 
 /** One owned temp directory, removed after the suite. */
 const owned: string[] = []
@@ -79,6 +98,17 @@ function run(...args: string[]): RunResult {
 
 /** The route selection every live scoring run in this suite names. */
 const ROUTE = ['--backend', 'codex', '--model', 'gpt-5.2-codex', '--effort', 'high', '--version', '0.156.1']
+
+/** Every fixture prompt the runner sent, in fixture order, captured through a run. */
+function capturedPrompts(): string[] {
+  const file = join(scratch(), 'prompts.jsonl')
+  const result = run(...ROUTE, '--command', process.execPath, '--arg', CAPTURE, '--arg', file)
+  expect(result.status).toBe(0)
+  return readFileSync(file, 'utf8')
+    .split('\n')
+    .filter(line => line.length > 0)
+    .map(line => JSON.parse(line) as string)
+}
 
 describe('shipped benchmark evidence', () => {
   it('resolves the evidence directory the archive ships', () => {
@@ -173,5 +203,60 @@ describe('benchmark runner live invocation', () => {
     const orphan = run(...ROUTE, '--arg', 'x', '--responses', 'recorded.json')
     expect(orphan.status).toBe(1)
     expect(orphan.stderr).toContain('--arg supplies an argument for --command')
+  })
+})
+
+describe('benchmark fixture prompt', () => {
+  it('names each fixture its candidate ids as the only reportable vocabulary', () => {
+    const prompts = capturedPrompts()
+    expect(prompts).toHaveLength(FIXTURES.length)
+
+    for (const [index, fixture] of FIXTURES.entries()) {
+      const prompt = prompts[index] ?? ''
+      // Every prompt still carries the report syntax, the scope, and the code.
+      expect(prompt).toContain('FINDING: <finding-id>')
+      expect(prompt).toContain(`Scope: ${fixture.scope}`)
+      expect(prompt).toContain(fixture.code)
+
+      if (fixture.expected.length === 0) continue
+      // The expected ids are exactly the candidates this prompt offers.
+      for (const id of fixture.expected) expect(prompt).toContain(id)
+      // No other fixture's ids leak into this one's vocabulary.
+      for (const id of SEEDED_IDS) {
+        if (!fixture.expected.includes(id)) expect(prompt).not.toContain(id)
+      }
+    }
+  })
+
+  it('tells a clean fixture an empty report is expected, and fabricates no candidate', () => {
+    const prompts = capturedPrompts()
+    const clean = FIXTURES.filter(fixture => fixture.expected.length === 0)
+    expect(clean.length).toBeGreaterThan(0)
+
+    for (const fixture of clean) {
+      const prompt = prompts[FIXTURES.indexOf(fixture)] ?? ''
+      expect(prompt).toContain('Candidate finding ids for this fixture: none.')
+      expect(prompt).toMatch(/report nothing/)
+      // A clean prompt must not offer a candidate borrowed from a seeded fixture.
+      for (const id of SEEDED_IDS) expect(prompt).not.toContain(id)
+    }
+  })
+
+  it('scores a report of the expected ids as full detection and no false positives', () => {
+    // The prompt change must not move the score: reporting exactly the expected
+    // ids is still 1.0 detection with 0.0 false positives.
+    const file = join(scratch(), 'responses.json')
+    writeFileSync(file, JSON.stringify(Object.fromEntries(FIXTURES.map(fixture => [fixture.id, fixture.expected]))))
+
+    const result = run(...ROUTE, '--responses', file)
+    expect(result.status).toBe(0)
+    expect(result.record).toMatchObject({ detectionScore: 1, falsePositiveScore: 0 })
+
+    const perFixture = result.record?.perFixture as { id: string; detected: string[]; falsePositives: string[] }[]
+    for (const scored of perFixture) {
+      const fixture = FIXTURES.find(entry => entry.id === scored.id)
+      expect(scored.detected).toEqual(fixture?.expected)
+      expect(scored.falsePositives).toEqual([])
+    }
   })
 })
