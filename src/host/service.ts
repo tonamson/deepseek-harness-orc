@@ -369,6 +369,25 @@ function fenceBodies(text: string): string[] {
 }
 
 /**
+ * The total number of characters {@link firstBalancedObject} may scan before it
+ * gives up and reports nothing locatable.
+ *
+ * Every candidate `{` rescans forward from its own position, so an answer that
+ * is a long run of never-balancing `{` is quadratic in its length: measured
+ * end-to-end through {@link OrcService.dispatch}, 10k `{` took 139 ms, 50k took
+ * 3.4 s, and 100k took 13.3 s — synchronously, on the host's event loop.
+ *
+ * The budget is four times the 1 MiB stdout cap the CLI adapter enforces on one
+ * answer, so a maximum-size answer is still rescanned several times over and
+ * every wrapping a real backend produces is located exactly as before — while
+ * the work stays bounded absolutely, whatever a provider route returns. A
+ * degenerate answer is refused in milliseconds. Exhausting the budget is
+ * "nothing locatable", which the caller already refuses with its bounded,
+ * redacted message.
+ */
+const REPORT_SCAN_CHAR_BUDGET = 4 * 1_048_576
+
+/**
  * The first balanced `{…}` object in the text that parses as JSON.
  *
  * The scan counts braces outside string literals only and honours backslash
@@ -380,10 +399,19 @@ function fenceBodies(text: string): string[] {
  * A `{` that never balances is skipped too: prose may open a brace it never
  * closes before the report, and abandoning the scan there would refuse an
  * otherwise locatable answer.
+ *
+ * The whole scan is bounded by {@link REPORT_SCAN_CHAR_BUDGET}: once the budget
+ * is spent the scan stops and reports nothing locatable, so a pathological
+ * answer cannot stall the event loop. Every normal answer is far inside the
+ * budget and is located exactly as it was before the bound existed.
  */
 function firstBalancedObject(text: string): unknown {
+  let scanned = 0
   for (let start = text.indexOf('{'); start !== -1; start = text.indexOf('{', start + 1)) {
-    const end = balancedEnd(text, start)
+    const remaining = REPORT_SCAN_CHAR_BUDGET - scanned
+    if (remaining <= 0) return undefined
+    const { end, used } = balancedEnd(text, start, remaining)
+    scanned += used
     if (end === -1) continue
     const parsed = tryJson(text.slice(start, end))
     if (parsed !== undefined) return parsed
@@ -391,12 +419,20 @@ function firstBalancedObject(text: string): unknown {
   return undefined
 }
 
-/** The index just past the `}` closing the `{` at `start`, or `-1` when unbalanced. */
-function balancedEnd(text: string, start: number): number {
+/**
+ * The index just past the `}` closing the `{` at `start`, or `-1` when the span
+ * never balances or would need more than `limit` characters to find out.
+ *
+ * `used` is the exact number of characters examined, so the caller can charge
+ * them against its scan budget: a span that closes early costs only its own
+ * length, and a span that runs out costs the limit it was given.
+ */
+function balancedEnd(text: string, start: number, limit: number): { end: number; used: number } {
+  const stop = Math.min(text.length, start + limit)
   let depth = 0
   let inString = false
   let escaped = false
-  for (let index = start; index < text.length; index += 1) {
+  for (let index = start; index < stop; index += 1) {
     const char = text[index]!
     if (inString) {
       if (escaped) escaped = false
@@ -408,10 +444,10 @@ function balancedEnd(text: string, start: number): number {
     else if (char === '{') depth += 1
     else if (char === '}') {
       depth -= 1
-      if (depth === 0) return index + 1
+      if (depth === 0) return { end: index + 1, used: index + 1 - start }
     }
   }
-  return -1
+  return { end: -1, used: stop - start }
 }
 
 /** Distinct values, in first-seen order. */

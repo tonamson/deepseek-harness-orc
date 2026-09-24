@@ -251,6 +251,34 @@ describe('OrcSettingsPage', () => {
     expect(fake.writes).toEqual([])
   })
 
+  it('writes the analysis mode the user selected', async () => {
+    const user = userEvent.setup()
+    const fake = fakeScope('orc')
+    const ui = render(<OrcSettingsPage scope={fake.scope} remote={fakeRemote()} locale="en" />)
+
+    await user.selectOptions(ui.getByLabelText('Analysis routing'), 'auto')
+
+    await vi.waitFor(() => expect(fake.writes).toEqual([
+      { namespace: 'orc', field: 'analysisMode', value: 'auto' },
+    ]))
+    expect(ui.getByLabelText('Analysis routing')).toHaveValue('auto')
+  })
+
+  it('reports a refused analysis-mode write instead of silently reverting', async () => {
+    const user = userEvent.setup()
+    const fake = fakeScope('orc')
+    const ui = render(<OrcSettingsPage scope={fake.scope} remote={fakeRemote()} locale="en" />)
+
+    fake.failNextWrite(new Error('settings write refused: analysisMode'))
+    await user.selectOptions(ui.getByLabelText('Analysis routing'), 'auto')
+
+    expect(await ui.findByText('The host refused the change: settings write refused: analysisMode')).toBeVisible()
+    // The host refused it, so the document is unchanged and the select still
+    // reads the old value: the refusal must be visible, never a silent revert.
+    expect(fake.writes).toEqual([])
+    expect(ui.getByLabelText('Analysis routing')).toHaveValue('manual')
+  })
+
   it('displays the exact failure code and diagnostic a probe returned', async () => {
     const user = userEvent.setup()
     const remote = fakeRemote({

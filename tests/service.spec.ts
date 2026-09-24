@@ -1301,6 +1301,28 @@ describe('report location', () => {
     expect(ports.journal.events.at(-1)!.type).toBe('orc/report-rejected')
     expect(eventNames(ports)).not.toContain('orc/review-result')
   })
+
+  it('refuses a pathological answer quickly instead of scanning it quadratically', async () => {
+    const ports = fakePorts()
+    const svc = new OrcService(ports)
+    await toReview(ports, svc)
+    // Every `{` here opens a span that never balances, so without a bound each
+    // of the 100k candidate starts rescans to the end of the text: this exact
+    // input measured ~13.3 s end-to-end before the scan budget existed.
+    ports.reports.push(rawAnswer('{'.repeat(100_000)))
+
+    const started = performance.now()
+    await expect(svc.dispatch(ports.supervisor, 'review', 'review task-1', signal))
+      .rejects.toThrow(/^blocking: the answer is not the report JSON: /)
+    const elapsed = performance.now() - started
+
+    // The budget caps the scan at 4 MiB of characters, so this is ~10 ms in
+    // practice; the threshold is deliberately loose for a slow machine while
+    // still failing the unbounded scan by more than an order of magnitude.
+    expect(elapsed).toBeLessThan(1_000)
+    expect(ports.journal.events.at(-1)!.type).toBe('orc/report-rejected')
+    expect(eventNames(ports)).not.toContain('orc/review-result')
+  })
 })
 
 describe('catalog reads', () => {

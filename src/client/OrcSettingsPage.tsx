@@ -379,7 +379,9 @@ export function OrcSettingsPage(props: OrcSettingsPageProps): ReactElement {
    * Every control writes fire-and-forget, but the host can refuse a write it
    * cannot accept. A rejection must never read as success, so the caller gets
    * the refusal (or `undefined` on success) and decides what not to claim; the
-   * reason is the bounded, credential-free message the host supplied.
+   * reason is the failure's own message — the safe, credential-free string the
+   * host transport supplied — rendered as-is, with no length bound applied here
+   * (see {@link messageOf}).
    */
   const write = async (run: () => Promise<void>): Promise<string | undefined> => {
     try {
@@ -576,7 +578,7 @@ export function OrcSettingsPage(props: OrcSettingsPageProps): ReactElement {
           id="orc-analysis-mode"
           value={config.analysisMode}
           onChange={event => {
-            void scope.set('analysisMode', event.target.value)
+            fire(() => scope.set('analysisMode', event.target.value))
             setSaved(false)
           }}
         >
