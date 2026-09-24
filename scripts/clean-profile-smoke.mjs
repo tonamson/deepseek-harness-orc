@@ -340,6 +340,9 @@ function fakeDeployment(serviceModule, workflowModule, journalModule, reports) {
         decisions.set(runId, [...(decisions.get(runId) ?? []), record.data.decision])
         continue
       }
+      // A refused report is an observation, not a lifecycle transition: the real
+      // projection folds it to the same state, so this fold skips it too.
+      if (record.type === 'orc/report-rejected') continue
       if (hasStartRisk(record.data)) risks.set(runId, record.data.risk)
       states.set(runId, reduce(states.get(runId) ?? initialState(), record.data))
     }

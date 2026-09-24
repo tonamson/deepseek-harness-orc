@@ -276,7 +276,8 @@ version table and are now resolved by ruling:
    followed by a version". This is a parser widening only. It leaves the pinned
    argv contract intact — `codexArgv` and `claudeArgv` are byte-for-byte
    unchanged (R11) — and it leaves the numeric component-by-component comparison
-   (`src/host/cli.ts:189-201`; no string/locale compare, no `parseFloat`), the
+   (`src/host/cli.ts:218-230`; `compareComponents` and `atOrAbove`, with no
+   string/locale compare and no `parseFloat`), the
    unchanged `0.156.1` floor (`0.156.1` supported, `0.156.0` refused,
    `0.157.0` supported), and the malformed-input rejections unchanged:
    `v0.156.1 garbage`, ANSI-wrapped `unknown`, `codex 1000.bad.1`, and every

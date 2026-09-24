@@ -323,6 +323,10 @@ function safeReason(error: unknown): string {
 /** The string form of a branded session id. */
 const idOf = (id: SessionId): string => String(id)
 
+/** Whether one request stage's result event carries a parsed report. */
+const carriesReport = (stage: RequestStage): boolean =>
+  stage === 'review' || stage === 'audit' || stage === 'final-review' || stage === 'final-audit'
+
 /**
  * Locate the report object in one review or audit answer.
  *
@@ -803,7 +807,13 @@ export class OrcService {
         await this.rejectReport(session, runId, analysis, correlationId, error)
         throw error
       }
-      await this.commit(session, this.resultEvent(runId, analysis, correlationId, report))
+      await this.commitResult(
+        session,
+        runId,
+        analysis,
+        correlationId,
+        this.resultEvent(runId, analysis, correlationId, report),
+      )
       return this.ports.journal.state(session)
     })
   }
@@ -939,8 +949,11 @@ export class OrcService {
         await this.rejectReport(session, runId, gate, correlationId, error)
         throw error
       }
-      return await this.commit(
+      return await this.commitResult(
         session,
+        runId,
+        gate,
+        correlationId,
         this.resultEvent(runId, stage, correlationId, report, stage === 'review' ? 'final-review' : 'final-audit'),
       )
     })
@@ -1126,6 +1139,40 @@ export class OrcService {
   /** Reduce one event against the committed state, then commit it. */
   private async commit(session: Session, event: OrcEvent): Promise<OrcState> {
     const next = reduce(this.ports.journal.state(session), event)
+    await this.ports.journal.commit(session, event)
+    this.phases.set(event.runId, next.phase)
+    return next
+  }
+
+  /**
+   * Commit one stage result, keeping a reducer refusal of a report durable.
+   *
+   * A report that passes {@link parseReport} can still be refused by the
+   * reducer, which owns the run-level rule the parser cannot see: a finding id
+   * must be unique across the whole run. That refusal is a refusal of this
+   * report — nothing consumes the pending request and the stage can be
+   * dispatched again — so it is recorded through the same durable
+   * `orc/report-rejected` path as a malformed answer instead of vanishing into
+   * a thrown error. The reduction runs here, before the commit, so only a
+   * reducer refusal takes that path: a journal write failure is an
+   * infrastructure fault and still propagates unchanged.
+   */
+  private async commitResult(
+    session: Session,
+    runId: string,
+    stage: RequestStage,
+    correlationId: string,
+    event: OrcEvent,
+  ): Promise<OrcState> {
+    let next: OrcState
+    try {
+      next = reduce(this.ports.journal.state(session), event)
+    } catch (error) {
+      if (carriesReport(stage)) {
+        await this.rejectReport(session, runId, stage, correlationId, new ReportError(malformedReason(error)))
+      }
+      throw error
+    }
     await this.ports.journal.commit(session, event)
     this.phases.set(event.runId, next.phase)
     return next

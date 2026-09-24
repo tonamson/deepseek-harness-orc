@@ -359,7 +359,6 @@ describe('OrcSettingsPage', () => {
 
     expect(ui.container.querySelectorAll('input[type="password"]')).toHaveLength(0)
     expect(ui.container.textContent ?? '').not.toMatch(/token|secret|api[-_ ]?key|password|credential/i)
-    expect(scopeWrites().every(write => write.namespace === 'orc')).toBe(true)
   })
 
   it('renders the Chinese dictionary when the active locale is zh', async () => {

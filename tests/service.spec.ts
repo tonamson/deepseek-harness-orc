@@ -1009,6 +1009,23 @@ describe('report contract and malformed-report recovery', () => {
     expect(svc.state(ports.supervisor).phase).toBe('review')
     expect(eventNames(ports).filter(name => name === 'orc/review-result')).toHaveLength(1)
     expect(svc.state(ports.supervisor).findings.map(finding => finding.id)).toEqual(['F-1'])
+
+    // The refusal is durably visible, exactly like a malformed report's: the
+    // reducer's run-level rule is the one refusal `parseReport` cannot see, and
+    // it must not vanish into a thrown error.
+    const rejection = ports.journal.events.at(-1)!
+    expect(rejection.type).toBe('orc/report-rejected')
+    expect(rejection.data).toMatchObject({
+      type: 'orc/report-rejected',
+      stage: 'review',
+      correlationId: expect.stringMatching(/^review:2:/),
+      reason: expect.stringMatching(/^blocking: the report is malformed: duplicate finding id F-1/),
+    })
+
+    // Nothing consumed the pending request, so the stage is still dispatchable.
+    ports.reports.push(cleanReport)
+    await expect(svc.dispatch(ports.supervisor, 'review', 'review task-1 a third time', signal))
+      .resolves.toMatchObject({ phase: 'audit' })
   })
 
   it('accepts a fresh finding id after a fix and advances the run', async () => {
