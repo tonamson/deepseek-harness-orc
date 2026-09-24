@@ -1435,3 +1435,19 @@ describe('settings bridge', () => {
     expect(ports.settings.connectionRevision(planRoute)).toHaveLength(64)
   })
 })
+
+it('denies the human-question tool to every ORC child', async () => {
+  const ports = fakePorts()
+  const service = new OrcService(ports)
+  await toImplement(ports, service)
+  await service.createLead(ports.supervisor)
+  expect(ports.subagents.starts[0]?.toolFilter).toEqual({ deny: ['ask_user_question'] })
+})
+
+it('refuses to create a child when the provider cannot restrict its tools', async () => {
+  const ports = fakePorts()
+  const service = new OrcService(ports)
+  await toImplement(ports, service)
+  ports.subagents.setToolFilter(false)
+  await expect(service.createLead(ports.supervisor)).rejects.toThrow(/cannot restrict child tools/)
+})

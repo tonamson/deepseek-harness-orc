@@ -39,7 +39,7 @@ import {
 import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import type { SubagentCapabilities } from '@deepseek-ai/dsh-subagent'
 import type { PromptSection } from '@deepseek-ai/dsh-system-prompt'
-import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
+import type { ToolDefinition, ToolRestriction } from '@deepseek-ai/dsh-tools'
 import { connectionRevision } from '../../src/domain/config.js'
 import type { BenchmarkSnapshot } from '../../src/domain/evidence.js'
 import type { RiskDecision } from '../../src/domain/risk.js'
@@ -298,13 +298,22 @@ function routeDecisions(records: readonly OrcRecord[]): RouteDecision[] {
 /** The continuable-child port plus the fixture's recorded starts. */
 export interface FakeSubagents extends OrcSubagentPort {
   /** Every start spec the service handed over, in order. */
-  readonly starts: { provider: string; label: string; childId?: string; parentId: string; agentOptions: AgentOptions | undefined }[]
+  readonly starts: {
+    provider: string
+    label: string
+    childId?: string
+    parentId: string
+    agentOptions: AgentOptions | undefined
+    toolFilter: ToolRestriction | undefined
+  }[]
   /** Every published child, keyed by child id. */
   readonly children: Map<string, FakeAgent>
   /** Make the next start fail. */
   failNextStart(error: Error | undefined): void
   /** Withdraw the continuable capability. */
   setCapable(capable: boolean): void
+  /** Withdraw the child tool-filter capability. */
+  setToolFilter(capable: boolean): void
 }
 
 // ------------------------------------------------------------------- settings
@@ -437,15 +446,16 @@ function fakeSubagents(deps: { agents: OrcAgentPort & { live: Map<string, FakeAg
   const starts: FakeSubagents['starts'] = []
   const children = new Map<string, FakeAgent>()
   let capable = true
+  let filterCapable = true
   let failure: Error | undefined
   let counter = 0
-  const capabilities: SubagentCapabilities = {
+  const capabilities = (): SubagentCapabilities => ({
     agentOptions: true,
     outputSchema: false,
     depthLimit: true,
-    toolFilter: true,
+    toolFilter: filterCapable,
     persona: true,
-  }
+  })
   return {
     starts,
     children,
@@ -455,10 +465,13 @@ function fakeSubagents(deps: { agents: OrcAgentPort & { live: Map<string, FakeAg
     setCapable: (next) => {
       capable = next
     },
+    setToolFilter: (next) => {
+      filterCapable = next
+    },
     getProvider: (name) => {
       if (name !== 'spawn') return undefined
       return {
-        capabilities,
+        capabilities: capabilities(),
         ...capable ? { prepareContinuable: () => ({}) } : {},
       }
     },
@@ -469,6 +482,7 @@ function fakeSubagents(deps: { agents: OrcAgentPort & { live: Map<string, FakeAg
         ...spec.childId === undefined ? {} : { childId: String(spec.childId) },
         parentId: String(spec.request.parent.id),
         agentOptions: spec.request.agentOptions,
+        toolFilter: spec.request.toolFilter,
       })
       if (spec.signal.aborted) {
         throw spec.signal.reason instanceof Error ? spec.signal.reason : new Error('aborted')

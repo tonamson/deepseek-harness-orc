@@ -53,6 +53,7 @@ import { createHash } from 'node:crypto'
 import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
 import { SessionId, type Session } from '@deepseek-ai/dsh-session'
 import type { ContinuableStart, ContinuableStartSpec, SubagentCapabilities } from '@deepseek-ai/dsh-subagent'
+import type { ToolRestriction } from '@deepseek-ai/dsh-tools'
 import { configRevision, routeKey } from '../domain/config.js'
 import type { BenchmarkSnapshot } from '../domain/evidence.js'
 import { parseReport, ReportError } from '../domain/report.js'
@@ -88,6 +89,27 @@ import type { OrcSettingsBridge } from './settings.js'
 
 /** The DSH subagent provider ORC creates its continuable children with. */
 export const ORC_CHILD_PROVIDER = 'spawn'
+
+/**
+ * The tools no ORC child may hold.
+ *
+ * DSH refuses human interaction to any agent owned by another live agent, so a
+ * child that calls `ask_user_question` fails at call time rather than parking.
+ * Removing the tool is the guarantee; the child's prompt only states it.
+ */
+export const ORC_CHILD_DENIED_TOOLS: ToolRestriction = { deny: ['ask_user_question'] }
+
+/**
+ * What every ORC child is told about human interaction.
+ *
+ * The tool filter above is the guarantee; this text exists so a child that
+ * needs a decision knows where to put it instead of guessing.
+ */
+export const ORC_CHILD_QUESTION_CONTRACT =
+  'You are a DSH child agent, so you cannot ask the human a question: `ask_user_question` is not available to you. ' +
+  'When you need a decision only the human can make, call the `orc` tool with action "raise-question" (taskId, question) and then stop and wait; ' +
+  'the Supervisor answers it and the answer arrives in your inbox. ' +
+  'Do not guess on a decision that changes scope, risk, or an irreversible outcome; raise it instead.'
 
 /**
  * The classification every final branch gate routes under.
@@ -1619,13 +1641,24 @@ export class OrcService {
       if (provider === undefined || typeof provider.prepareContinuable !== 'function') {
         throw new OrcServiceError(`the DSH subagent provider "${ORC_CHILD_PROVIDER}" cannot create continuable children`)
       }
+      if (provider.capabilities.toolFilter !== true) {
+        throw new OrcServiceError(
+          `the DSH subagent provider "${ORC_CHILD_PROVIDER}" cannot restrict child tools, so ORC cannot guarantee its children never ask the human`,
+        )
+      }
       const started = await subagents.startContinuable({
         provider: ORC_CHILD_PROVIDER,
         label,
         childId,
         request: {
           parent,
-          prompt: [{ type: 'text', text: `${label} (${idOf(childId)}) owns work delegated by ORC run ${runId}.` }],
+          prompt: [
+            {
+              type: 'text',
+              text: `${label} (${idOf(childId)}) owns work delegated by ORC run ${runId}.\n\n${ORC_CHILD_QUESTION_CONTRACT}`,
+            },
+          ],
+          toolFilter: ORC_CHILD_DENIED_TOOLS,
           ...this.childOptions(parent),
         },
         signal: this.lifetime.signal,
