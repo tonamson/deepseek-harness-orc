@@ -100,7 +100,7 @@ that cannot be carried cannot be lied about.
 
 ### Transitions
 
-**`question-raise`** — `roles: ['peer']`, `from: ['implement']`
+**`question-raise`** — `roles: ['peer']`, `from: NON_TERMINAL_PHASES`
 
 - The task must exist and must not already be `settled`. A peer that has reported
   its work finished cannot then declare itself blocked on it; otherwise the
@@ -112,9 +112,15 @@ that cannot be carried cannot be lied about.
 - The record is appended with `peerId: event.actorId`, `status: 'open'`,
   `answer: null`.
 
-`from: ['implement']` is exact rather than restrictive. `peer-create`,
-`task-start`, and `task-settle` are all `from: ['implement']`, so a peer exists
-and can act only in that phase.
+`from: NON_TERMINAL_PHASES` is as wide as `question-answer`'s gate, and the
+guards below are what make it safe: the task must exist, must not already be
+settled, and must be owned by the raising peer. A narrower `['implement']` gate
+would be false protection, not a restriction. `review-request` requires only
+`!hasOpenBlocking` and `!hasOpenQuestion`, not `requireAllTasksSettled`, so in a
+two-peer run peer-1 can settle, the lead can dispatch review, and the run can be
+in `review` while peer-2's task is still `started`. A peer in that position
+could not raise the question it needs to park on if the gate were
+`['implement']`.
 
 **`question-answer`** — `roles: ['supervisor']`, `from: NON_TERMINAL_PHASES`,
 `authority: requireSupervisor`
@@ -222,19 +228,35 @@ and `answer-question` (`questionId`, `answer`).
 `valueOf` gains one line so every result exposes outstanding decisions:
 
 ```ts
-questions: state.questions.map(question => `${question.id}:${question.status}`),
+questions: state.questions.map(question =>
+  `${question.id}:${question.status}:${question.question.replace(/\s+/g, ' ').slice(0, MAX_STATED_QUESTION_CHARS)}`,
+),
 ```
+
+`MAX_STATED_QUESTION_CHARS` is 200. The readout has to carry the question's text
+because the Supervisor is the one who puts it to the human, but the text is
+model-authored and unbounded, and it enters both the durable session log and,
+through the answer, another agent's context; the bound keeps one raise from
+flooding either. Collapsing whitespace to a single space keeps the readout on one
+line.
 
 `ORC_POLICY` gains a paragraph describing the flow: a peer raises, the run parks,
 the Supervisor puts the question to the human, and ORC delivers the answer back.
 
 ## Child contract
 
-`startChild` adds the hard guarantee to the delegation request:
+`startChild` adds the hard guarantee to the delegation request whenever the
+profile actually registers the tool:
 
 ```ts
 toolFilter: { deny: ['ask_user_question'] },
 ```
+
+`tools.restrict()` rejects an unknown name, so a preset that omits
+`ask_user_question` — the `minimal` preset, or a user-authored one — is a
+supported configuration in which the filter is omitted and the guarantee holds
+vacuously (see Known risks). A tool present in the parent's view still carries the
+filter.
 
 A capability guard fails loudly when the provider cannot honour it, matching
 ORC's fail-closed stance on capabilities it depends on:
@@ -244,11 +266,19 @@ if (provider.capabilities.toolFilter !== true)
   throw new OrcServiceError(`the DSH subagent provider "${ORC_CHILD_PROVIDER}" cannot restrict child tools, so ORC cannot guarantee its children never ask the human`)
 ```
 
-The child's prompt gains the contract: the child cannot ask the human, the tool is
-not available to it; when it needs a decision only the human can make it must call
-the `orc` tool with action `raise-question` and then stop and wait; the answer
-arrives in its inbox; and it must not guess on a decision that changes scope,
-risk, or an irreversible outcome.
+The child's prompt gains one of two role-specific contracts. A Peer is told it
+cannot ask the human, that `ask_user_question` is not available to it, and that
+when it needs a decision only the human can make it must call the `orc` tool with
+action `raise-question` (`taskId`, `question`) and then stop and wait; the
+Supervisor answers it and the answer arrives in its inbox; and it must not guess
+on a decision that changes scope, risk, or an irreversible outcome. The Lead is
+told the same about the human, and additionally that it owns no task in this run,
+so it cannot raise an ORC question either — a raise resolves its peer through the
+task's owner, so a Lead that raised one anyway would attribute it to that peer and
+the answer would be delivered to the peer while the Lead waited for it. The Lead's
+path is DSH's own guidance for an owned child: state the decision it needs in the
+final result. A Peer that owns a task raises its own question; the Lead must not
+raise one on its behalf.
 
 The prompt states the contract; `toolFilter` enforces it. The guarantee does not
 depend on the model reading the prompt.
@@ -305,6 +335,8 @@ Regression that must stay green: the existing test suite, `npm run typecheck`,
 | An older log has no `questions` | additive change; an explicit replay test covers it |
 | A failed delivery strands a peer | idempotent re-answer is the retry path |
 | A model ignores the prompt contract | the guarantee is `toolFilter`, not the prompt |
+| The deny filter is applied only when the profile registers `ask_user_question` | `tools.restrict()` rejects an unknown name, and a preset that omits the tool is a supported configuration; the filter is omitted there and the guarantee holds vacuously |
+| A child created before this change has no filter in its durable descriptor | cold-resuming it regains the tool and fails with the old loud `DELEGATED_CALLER` refusal; ORC cannot fix it without patching DSH |
 
 ## Source references
 

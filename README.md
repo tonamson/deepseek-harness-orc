@@ -97,6 +97,15 @@ as a clean audit: ORC states the required report format to each review and audit
 backend it dispatches to, and a malformed report leaves the run blocked in its
 stage, so the same stage can be dispatched again once the cause is fixed.
 
+An ORC child — Lead or Peer — cannot ask the human: DSH refuses human interaction
+to any agent another agent owns, so `ask_user_question` is not available to them.
+A Peer that needs a decision only the human can make raises it with the ORC tool
+and waits, and the run parks — the review, the final review, and settlement of
+that task are refused until the question is answered. The Supervisor puts the
+question to the human and answers it, and ORC delivers the answer to the peer that
+raised it. A Lead owns no task, so it states the decision it needs in its final
+result instead.
+
 ## Settings
 
 The ORC page lives in the Web settings section and owns only the `orc` settings

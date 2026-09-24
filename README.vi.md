@@ -97,6 +97,15 @@ backend review và audit mà nó dispatch tới, và một báo cáo sai định
 bị chặn ở đúng stage đó, nên có thể dispatch lại chính stage ấy sau khi đã sửa
 nguyên nhân.
 
+Một child của ORC — dù là Lead hay Peer — không thể hỏi người dùng: DSH từ chối mọi
+tương tác với con người đối với agent do một agent khác sở hữu, nên
+`ask_user_question` không khả dụng với chúng. Khi một Peer cần quyết định mà chỉ
+người dùng mới đưa ra được, nó nêu câu hỏi qua tool ORC rồi chờ, và run tạm dừng —
+review, final review và việc settle task đó đều bị từ chối cho tới khi câu hỏi được
+trả lời. Supervisor đặt câu hỏi cho người dùng và trả lời, rồi ORC chuyển câu trả
+lời đến đúng peer đã nêu câu hỏi. Lead không sở hữu task nào, nên nó nêu quyết định
+mình cần trong final result thay vì nêu câu hỏi.
+
 ## Cấu hình
 
 Trang ORC nằm trong mục cài đặt trên Web và chỉ sở hữu namespace `orc`. Trang cấu
